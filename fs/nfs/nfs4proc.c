@@ -2343,8 +2343,6 @@ static int nfs4_opendata_access(struct rpc_cred *cred,
 	if ((mask & ~cache.mask & (MAY_READ | MAY_EXEC)) == 0)
 		return 0;
 
-	/* even though OPEN succeeded, access is denied. Close the file */
-	nfs4_close_state(state, fmode);
 	return -EACCES;
 }
 
@@ -2385,8 +2383,10 @@ static int _nfs4_proc_open(struct nfs4_opendata *data)
 		if (status != 0)
 			return status;
 	}
-	if (!(o_res->f_attr->valid & NFS_ATTR_FATTR))
+	if (!(o_res->f_attr->valid & NFS_ATTR_FATTR)) {
+		nfs4_sequence_free_slot(&o_res->seq_res);
 		nfs4_proc_getattr(server, &o_res->fh, o_res->f_attr, o_res->f_label);
+	}
 	return 0;
 }
 
@@ -6419,7 +6419,7 @@ nfs4_retry_setlk(struct nfs4_state *state, int cmd, struct file_lock *request)
 		set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&q->lock, flags);
 
-		freezable_schedule_timeout_interruptible(NFS4_LOCK_MAXTIMEOUT);
+		freezable_schedule_timeout(NFS4_LOCK_MAXTIMEOUT);
 	}
 
 	finish_wait(q, &wait);
@@ -7410,7 +7410,7 @@ static void nfs4_exchange_id_done(struct rpc_task *task, void *data)
 			cdata->res.server_scope = NULL;
 		}
 		/* Save the EXCHANGE_ID verifier session trunk tests */
-		memcpy(clp->cl_confirm.data, cdata->args.verifier->data,
+		memcpy(clp->cl_confirm.data, cdata->args.verifier.data,
 		       sizeof(clp->cl_confirm.data));
 	}
 out:
@@ -7447,7 +7447,6 @@ static const struct rpc_call_ops nfs4_exchange_id_call_ops = {
 static int _nfs4_proc_exchange_id(struct nfs_client *clp, struct rpc_cred *cred,
 			u32 sp4_how, struct rpc_xprt *xprt)
 {
-	nfs4_verifier verifier;
 	struct rpc_message msg = {
 		.rpc_proc = &nfs4_procedures[NFSPROC4_CLNT_EXCHANGE_ID],
 		.rpc_cred = cred,
@@ -7470,8 +7469,7 @@ static int _nfs4_proc_exchange_id(struct nfs_client *clp, struct rpc_cred *cred,
 	if (!calldata)
 		goto out;
 
-	if (!xprt)
-		nfs4_init_boot_verifier(clp, &verifier);
+	nfs4_init_boot_verifier(clp, &calldata->args.verifier);
 
 	status = nfs4_init_uniform_client_string(clp);
 	if (status)
@@ -7516,9 +7514,8 @@ static int _nfs4_proc_exchange_id(struct nfs_client *clp, struct rpc_cred *cred,
 		task_setup_data.rpc_xprt = xprt;
 		task_setup_data.flags =
 				RPC_TASK_SOFT|RPC_TASK_SOFTCONN|RPC_TASK_ASYNC;
-		calldata->args.verifier = &clp->cl_confirm;
-	} else {
-		calldata->args.verifier = &verifier;
+		memcpy(calldata->args.verifier.data, clp->cl_confirm.data,
+				sizeof(calldata->args.verifier.data));
 	}
 	calldata->args.client = clp;
 #ifdef CONFIG_NFS_V4_1_MIGRATION
@@ -8429,6 +8426,7 @@ static void nfs4_layoutget_release(void *calldata)
 	size_t max_pages = max_response_pages(server);
 
 	dprintk("--> %s\n", __func__);
+	nfs4_sequence_free_slot(&lgp->res.seq_res);
 	nfs4_free_pages(lgp->args.layout.pages, max_pages);
 	pnfs_put_layout_hdr(NFS_I(inode)->layout);
 	put_nfs_open_context(lgp->args.ctx);
@@ -8503,7 +8501,6 @@ nfs4_proc_layoutget(struct nfs4_layoutget *lgp, long *timeout, gfp_t gfp_flags)
 	/* if layoutp->len is 0, nfs4_layoutget_prepare called rpc_exit */
 	if (status == 0 && lgp->res.layoutp->len)
 		lseg = pnfs_layout_process(lgp);
-	nfs4_sequence_free_slot(&lgp->res.seq_res);
 	rpc_put_task(task);
 	dprintk("<-- %s status=%d\n", __func__, status);
 	if (status)

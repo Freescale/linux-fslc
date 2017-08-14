@@ -1227,8 +1227,11 @@ int do_huge_pmd_numa_page(struct fault_env *fe, pmd_t pmd)
 	 */
 	if (unlikely(pmd_trans_migrating(*fe->pmd))) {
 		page = pmd_page(*fe->pmd);
+		if (!get_page_unless_zero(page))
+			goto out_unlock;
 		spin_unlock(fe->ptl);
 		wait_on_page_locked(page);
+		put_page(page);
 		goto out;
 	}
 
@@ -1260,8 +1263,11 @@ int do_huge_pmd_numa_page(struct fault_env *fe, pmd_t pmd)
 
 	/* Migration could have started since the pmd_trans_migrating check */
 	if (!page_locked) {
+		if (!get_page_unless_zero(page))
+			goto out_unlock;
 		spin_unlock(fe->ptl);
 		wait_on_page_locked(page);
+		put_page(page);
 		page_nid = -1;
 		goto out;
 	}
@@ -1367,8 +1373,8 @@ bool madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		get_page(page);
 		spin_unlock(ptl);
 		split_huge_page(page);
-		put_page(page);
 		unlock_page(page);
+		put_page(page);
 		goto out_unlocked;
 	}
 
@@ -1380,8 +1386,7 @@ bool madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		deactivate_page(page);
 
 	if (pmd_young(orig_pmd) || pmd_dirty(orig_pmd)) {
-		orig_pmd = pmdp_huge_get_and_clear_full(tlb->mm, addr, pmd,
-			tlb->fullmm);
+		pmdp_invalidate(vma, addr, pmd);
 		orig_pmd = pmd_mkold(orig_pmd);
 		orig_pmd = pmd_mkclean(orig_pmd);
 

@@ -2671,8 +2671,6 @@ mlx5e_get_stats(struct net_device *dev, struct rtnl_link_stats64 *stats)
 		PPORT_802_3_GET(pstats, a_frame_check_sequence_errors);
 	stats->rx_frame_errors = PPORT_802_3_GET(pstats, a_alignment_errors);
 	stats->tx_aborted_errors = PPORT_2863_GET(pstats, if_out_discards);
-	stats->tx_carrier_errors =
-		PPORT_802_3_GET(pstats, a_symbol_error_during_carrier);
 	stats->rx_errors = stats->rx_length_errors + stats->rx_crc_errors +
 			   stats->rx_frame_errors;
 	stats->tx_errors = stats->tx_aborted_errors + stats->tx_carrier_errors;
@@ -3846,7 +3844,8 @@ struct net_device *mlx5e_create_netdev(struct mlx5_core_dev *mdev,
 	return netdev;
 
 err_cleanup_nic:
-	profile->cleanup(priv);
+	if (profile->cleanup)
+		profile->cleanup(priv);
 	free_netdev(netdev);
 
 	return NULL;
