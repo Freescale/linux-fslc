@@ -5440,19 +5440,30 @@ static int ext4_enable_quotas(struct super_block *sb)
 	};
 
 	sb_dqopt(sb)->flags |= DQUOT_QUOTA_SYS_FILE;
-	for (type = 0; type < EXT4_MAXQUOTAS; type++) {
-		if (qf_inums[type]) {
-			err = ext4_quota_enable(sb, type, QFMT_VFS_V1,
-						DQUOT_USAGE_ENABLED);
-			if (err) {
-				ext4_warning(sb,
-					"Failed to enable quota tracking "
-					"(type=%d, err=%d). Please run "
-					"e2fsck to fix.", type, err);
-				return err;
-			}
-		}
+	if (err) {
+		for (type--; type >= 0; type--)
+			dquot_quota_off(sb, type);
+		ext4_warning(sb,
+ 			"Failed to enable quota tracking "
+ 			"(type=%d, err=%d). Please run "
+			"e2fsck to fix.", type, err);
+		for (type--; type >= 0; type--)
+			dquot_quota_off(sb, type);
+	         return err;
 	}
+//	for (type = 0; type < EXT4_MAXQUOTAS; type++) {
+//		if (qf_inums[type]) {
+//			err = ext4_quota_enable(sb, type, QFMT_VFS_V1,
+//						DQUOT_USAGE_ENABLED);
+//			if (err) {
+//				ext4_warning(sb,
+//					"Failed to enable quota tracking "
+//					"(type=%d, err=%d). Please run "
+//					"e2fsck to fix.", type, err);
+//				return err;
+//			}
+//		}
+//	}
 	return 0;
 }
 
