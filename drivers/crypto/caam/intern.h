@@ -9,6 +9,7 @@
 
 #ifndef INTERN_H
 #define INTERN_H
+#include "regs.h"
 
 /* Currently comes from Kconfig param as a ^2 (driver-required) */
 #define JOBR_DEPTH (1 << CONFIG_CRYPTO_DEV_FSL_CAAM_RINGSIZE)
@@ -68,7 +69,6 @@ struct caam_drv_private {
 #ifdef CONFIG_CAAM_QI
 	struct device *qidev;
 #endif
-
 	/* Physical-presence section */
 	struct caam_ctrl __iomem *ctrl; /* controller region */
 	struct caam_deco __iomem *deco; /* DECO/CCB views */
@@ -76,6 +76,12 @@ struct caam_drv_private {
 	struct caam_queue_if __iomem *qi; /* QI control region */
 	struct caam_job_ring __iomem *jr[4];	/* JobR's register space */
 
+	struct device *smdev;
+	dma_addr_t __iomem *sm_base;	/* Secure memory storage base */	
+	phys_addr_t sm_phy;		/* Secure memory storage physical */
+	u32 sm_size;
+	bool has_seco;
+	
 	/*
 	 * Detected geometry block. Filled in from device tree if powerpc,
 	 * or from register-based version detection code
@@ -97,7 +103,7 @@ struct caam_drv_private {
 	struct clk *caam_mem;
 	struct clk *caam_aclk;
 	struct clk *caam_emi_slow;
-
+	
 	/*
 	 * debugfs entries for developer view into driver/device
 	 * variables at runtime.

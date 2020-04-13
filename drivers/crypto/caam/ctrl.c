@@ -16,6 +16,7 @@
 #include "jr.h"
 #include "desc_constr.h"
 #include "ctrl.h"
+#include "sm.h"
 
 bool caam_little_end;
 EXPORT_SYMBOL(caam_little_end);
@@ -484,6 +485,7 @@ static int caam_probe(struct platform_device *pdev)
 	};
 	struct device *dev;
 	struct device_node *nprop, *np;
+	struct resource res_regs;
 	struct caam_ctrl __iomem *ctrl;
 	struct caam_drv_private *ctrlpriv;
 	struct clk *clk;
@@ -615,6 +617,37 @@ static int caam_probe(struct platform_device *pdev)
 
 	/* Get the IRQ of the controller (for security violations only) */
 	ctrlpriv->secvio_irq = irq_of_parse_and_map(nprop, 0);
+
+	/* Get CAAM-SM node and of_iomap() and save */
+	np = of_find_compatible_node(NULL, NULL, "fsl,imx6q-caam-sm");
+	if (!np) {
+		ret = -ENODEV;
+		goto iounmap_ctrl;
+	}
+
+	/* Get CAAM SM registers base address from device tree */
+	ret = of_address_to_resource(np, 0, &res_regs);
+	if (ret) {
+		dev_err(dev, "failed to retrieve registers base from device tree\n");
+		ret = -ENODEV;
+		goto iounmap_ctrl;
+	}
+
+	ctrlpriv->sm_phy = res_regs.start;
+	ctrlpriv->sm_base = devm_ioremap_resource(dev, &res_regs);
+	if (IS_ERR(ctrlpriv->sm_base)) {
+		ret = PTR_ERR(ctrlpriv->sm_base);
+		goto iounmap_ctrl;
+	}
+
+	if (!of_machine_is_compatible("fsl,imx8mm") &&
+		!of_machine_is_compatible("fsl,imx8mq") &&
+	    !of_machine_is_compatible("fsl,imx8qm") &&
+	    !of_machine_is_compatible("fsl,imx8qxp")) {
+		ctrlpriv->sm_size = resource_size(&res_regs);
+	} else {
+		ctrlpriv->sm_size = PG_SIZE_64K;
+	}
 
 	/*
 	 * Enable DECO watchdogs and, if this is a PHYS_ADDR_T_64BIT kernel,
