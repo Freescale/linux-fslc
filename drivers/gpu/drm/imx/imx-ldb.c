@@ -241,6 +241,13 @@ static void imx_ldb_encoder_disable(struct drm_encoder *encoder)
 	struct ldb *ldb = &imx_ldb->base;
 	int mux, ret;
 
+	if (imx_ldb_ch == &ldb->channel[0] || ldb->dual)
+		ldb->ldb_ctrl &= ~LDB_CH0_MODE_EN_MASK;
+	if (imx_ldb_ch == &ldb->channel[1] || ldb->dual)
+		ldb->ldb_ctrl &= ~LDB_CH1_MODE_EN_MASK;
+
+	regmap_write(ldb->regmap, IOMUXC_GPR2, ldb->ldb_ctrl);
+
 	if (ldb->dual) {
 		clk_disable_unprepare(imx_ldb->clk[0]);
 		clk_disable_unprepare(imx_ldb->clk[1]);
