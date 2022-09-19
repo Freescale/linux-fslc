@@ -216,7 +216,8 @@ typedef struct _mgslpc_info {
 
 	/* PCMCIA support */
 	struct pcmcia_device	*p_dev;
-	int		      stop;
+	int			stop;
+	struct kref		refcnt;
 
 	/* SPPP/Cisco HDLC device parts */
 	int netcount;
@@ -227,6 +228,8 @@ typedef struct _mgslpc_info {
 #endif
 
 } MGSLPC_INFO;
+
+static DEFINE_MUTEX(remove_mutex);
 
 #define MGSLPC_MAGIC 0x5402
 
@@ -468,9 +471,20 @@ static void mgslpc_wait_until_sent(struct tty_struct *tty, int timeout);
 
 /* PCMCIA prototypes */
 
+static void mgslpc_delete(struct kref *kref);
 static int mgslpc_config(struct pcmcia_device *link);
 static void mgslpc_release(u_long arg);
 static void mgslpc_detach(struct pcmcia_device *p_dev);
+
+static void mgslpc_delete(struct kref *kref)
+{
+	MGSLPC_INFO *info = container_of(kref, MGSLPC_INFO, refcnt);
+	struct pcmcia_device *link = info->p_dev;
+
+	mgslpc_release((u_long)link);
+
+	mgslpc_remove_device(info);
+}
 
 /*
  * 1st function defined in .text section. Calling this function in
@@ -534,6 +548,7 @@ static int mgslpc_probe(struct pcmcia_device *link)
 	init_waitqueue_head(&info->event_wait_q);
 	spin_lock_init(&info->lock);
 	spin_lock_init(&info->netlock);
+	kref_init(&info->refcnt);
 	memcpy(&info->params,&default_params,sizeof(MGSL_PARAMS));
 	info->idle_mode = HDLC_TXIDLE_FLAGS;
 	info->imra_value = 0xffff;
@@ -620,13 +635,15 @@ static void mgslpc_release(u_long arg)
 
 static void mgslpc_detach(struct pcmcia_device *link)
 {
+	MGSLPC_INFO *info = link->priv;
+
+	mutex_lock(&remove_mutex);
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("mgslpc_detach(0x%p)\n", link);
 
-	((MGSLPC_INFO *)link->priv)->stop = 1;
-	mgslpc_release((u_long)link);
-
-	mgslpc_remove_device((MGSLPC_INFO *)link->priv);
+	info->stop = 1;
+	kref_put(&info->refcnt, mgslpc_delete);
+	mutex_unlock(&remove_mutex);
 }
 
 static int mgslpc_suspend(struct pcmcia_device *link)
@@ -2339,10 +2356,13 @@ static void mgslpc_close(struct tty_struct *tty, struct file * filp)
 	
 	tty_port_close_end(port, tty);
 	tty_port_tty_set(port, NULL);
+
 cleanup:
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgslpc_close(%s) exit, count=%d\n", __FILE__, __LINE__,
 			tty->driver->name, port->count);
+
+	kref_put(&info->refcnt, mgslpc_delete);
 }
 
 /* Wait until the transmitter is empty.
@@ -2463,6 +2483,8 @@ static int mgslpc_open(struct tty_struct *tty, struct file * filp)
 	int		retval, line;
 	unsigned long	flags;
 
+	mutex_lock(&remove_mutex);
+
 	/* verify range of specified line number */
 	line = tty->index;
 	if (line >= mgslpc_device_count) {
@@ -2515,9 +2537,10 @@ static int mgslpc_open(struct tty_struct *tty, struct file * filp)
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgslpc_open(%s) success\n",
 			 __FILE__, __LINE__, info->device_name);
-	retval = 0;
 
+	kref_get(&info->refcnt);
 cleanup:
+	mutex_unlock(&remove_mutex);
 	return retval;
 }
 
