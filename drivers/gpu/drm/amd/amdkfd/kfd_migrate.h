@@ -42,7 +42,8 @@ enum MIGRATION_COPY_DIR {
 
 int svm_migrate_to_vram(struct svm_range *prange,  uint32_t best_loc,
 			struct mm_struct *mm);
-int svm_migrate_vram_to_ram(struct svm_range *prange, struct mm_struct *mm);
+int svm_migrate_vram_to_ram(struct svm_range *prange, struct mm_struct *mm,
+			    struct page *fault_page);
 unsigned long
 svm_migrate_addr_to_pfn(struct amdgpu_device *adev, unsigned long addr);
 

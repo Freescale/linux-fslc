@@ -45,6 +45,8 @@ extern void putback_movable_pages(struct list_head *l);
 extern int migrate_page(struct address_space *mapping,
 			struct page *newpage, struct page *page,
 			enum migrate_mode mode);
+int migrate_page_extra(struct address_space *mapping, struct page *dst,
+		struct page *src, enum migrate_mode mode, int extra_count);
 extern int migrate_pages(struct list_head *l, new_page_t new, free_page_t free,
 		unsigned long private, enum migrate_mode mode, int reason,
 		unsigned int *ret_succeeded);
@@ -167,6 +169,12 @@ struct migrate_vma {
 	 */
 	void			*pgmap_owner;
 	unsigned long		flags;
+
+	/*
+	 * Set to vmf->page if this is being called to migrate a page as part of
+	 * a migrate_to_ram() callback.
+	 */
+	struct page		*fault_page;
 };
 
 int migrate_vma_setup(struct migrate_vma *args);
