@@ -13,6 +13,25 @@
 
 /delete-node/&pmic_nxp;
 
+&uart1 { /* BT */
+	bluetooth {
+		compatible = "qcom,qca9377-bt";
+		enable-gpios = <&gpio2 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&iomuxc {
+	pinctrl_uart1: uart1grp {
+		fsl,pins = <
+			MX8MM_IOMUXC_UART1_RXD_UART1_DCE_RX     0x140
+			MX8MM_IOMUXC_UART1_TXD_UART1_DCE_TX     0x140
+			MX8MM_IOMUXC_UART3_RXD_UART1_DCE_CTS_B  0x140
+			MX8MM_IOMUXC_UART3_TXD_UART1_DCE_RTS_B  0x140
+			MX8MM_IOMUXC_SD1_DATA4_GPIO2_IO6        0x19
+		>;
+	};
+};
+
 &i2c1 {
 	pmic_rohm: pmic@4b {
 		compatible = "rohm,bd71847";
