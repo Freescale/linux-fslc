@@ -775,12 +775,7 @@ extern int vmw_user_resource_lookup_handle(
 	uint32_t handle,
 	const struct vmw_user_resource_conv *converter,
 	struct vmw_resource **p_res);
-extern struct vmw_resource *
-vmw_user_resource_noref_lookup_handle(struct vmw_private *dev_priv,
-				      struct ttm_object_file *tfile,
-				      uint32_t handle,
-				      const struct vmw_user_resource_conv *
-				      converter);
+
 extern int vmw_stream_claim_ioctl(struct drm_device *dev, void *data,
 				  struct drm_file *file_priv);
 extern int vmw_stream_unref_ioctl(struct drm_device *dev, void *data,
@@ -817,15 +812,6 @@ int vmw_resources_clean(struct vmw_buffer_object *vbo, pgoff_t start,
 static inline bool vmw_resource_mob_attached(const struct vmw_resource *res)
 {
 	return !RB_EMPTY_NODE(&res->mob_node);
-}
-
-/**
- * vmw_user_resource_noref_release - release a user resource pointer looked up
- * without reference
- */
-static inline void vmw_user_resource_noref_release(void)
-{
-	ttm_base_object_noref_release();
 }
 
 /**
@@ -888,8 +874,6 @@ extern void vmw_bo_unmap(struct vmw_buffer_object *vbo);
 extern void vmw_bo_move_notify(struct ttm_buffer_object *bo,
 			       struct ttm_resource *mem);
 extern void vmw_bo_swap_notify(struct ttm_buffer_object *bo);
-extern struct vmw_buffer_object *
-vmw_user_bo_noref_lookup(struct ttm_object_file *tfile, u32 handle);
 
 /**
  * vmw_user_bo_noref_release - release a buffer object pointer looked up
