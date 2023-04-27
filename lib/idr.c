@@ -470,6 +470,7 @@ alloc:
 	goto retry;
 nospc:
 	xas_unlock_irqrestore(&xas, flags);
+	kfree(alloc);
 	return -ENOSPC;
 }
 EXPORT_SYMBOL(ida_alloc_range);
@@ -488,7 +489,8 @@ void ida_free(struct ida *ida, unsigned int id)
 	struct ida_bitmap *bitmap;
 	unsigned long flags;
 
-	BUG_ON((int)id < 0);
+	if ((int)id < 0)
+		return;
 
 	xas_lock_irqsave(&xas, flags);
 	bitmap = xas_load(&xas);

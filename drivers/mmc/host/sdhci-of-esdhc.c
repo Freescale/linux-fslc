@@ -81,6 +81,7 @@ struct sdhci_esdhc {
 	bool quirk_tuning_erratum_type2;
 	bool quirk_ignore_data_inhibit;
 	bool quirk_delay_before_data_reset;
+	bool quirk_trans_complete_erratum;
 	bool in_sw_tuning;
 	unsigned int peripheral_clock;
 	const struct esdhc_clk_fixup *clk_fixup;
@@ -518,12 +519,16 @@ static void esdhc_of_adma_workaround(struct sdhci_host *host, u32 intmask)
 
 static int esdhc_of_enable_dma(struct sdhci_host *host)
 {
+	int ret;
 	u32 value;
 	struct device *dev = mmc_dev(host->mmc);
 
 	if (of_device_is_compatible(dev->of_node, "fsl,ls1043a-esdhc") ||
-	    of_device_is_compatible(dev->of_node, "fsl,ls1046a-esdhc"))
-		dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+	    of_device_is_compatible(dev->of_node, "fsl,ls1046a-esdhc")) {
+		ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+		if (ret)
+			return ret;
+	}
 
 	value = sdhci_readl(host, ESDHC_DMA_SYSCTL);
 
@@ -839,6 +844,7 @@ static int esdhc_signal_voltage_switch(struct mmc_host *mmc,
 		scfg_node = of_find_matching_node(NULL, scfg_device_ids);
 		if (scfg_node)
 			scfg_base = of_iomap(scfg_node, 0);
+		of_node_put(scfg_node);
 		if (scfg_base) {
 			sdhciovselcr = SDHCIOVSELCR_TGLEN |
 				       SDHCIOVSELCR_VSELVAL;
@@ -1003,6 +1009,17 @@ static int esdhc_execute_tuning(struct mmc_host *mmc, u32 opcode)
 
 	esdhc_tuning_block_enable(host, true);
 
+	/*
+	 * The eSDHC controller takes the data timeout value into account
+	 * during tuning. If the SD card is too slow sending the response, the
+	 * timer will expire and a "Buffer Read Ready" interrupt without data
+	 * is triggered. This leads to tuning errors.
+	 *
+	 * Just set the timeout to the maximum value because the core will
+	 * already take care of it in sdhci_send_tuning().
+	 */
+	sdhci_writeb(host, 0xe, SDHCI_TIMEOUT_CONTROL);
+
 	hs400_tuning = host->flags & SDHCI_HS400_TUNING;
 
 	do {
@@ -1082,10 +1099,11 @@ static void esdhc_set_uhs_signaling(struct sdhci_host *host,
 
 static u32 esdhc_irq(struct sdhci_host *host, u32 intmask)
 {
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_esdhc *esdhc = sdhci_pltfm_priv(pltfm_host);
 	u32 command;
 
-	if (of_find_compatible_node(NULL, NULL,
-				"fsl,p2020-esdhc")) {
+	if (esdhc->quirk_trans_complete_erratum) {
 		command = SDHCI_GET_CMD(sdhci_readw(host,
 					SDHCI_COMMAND));
 		if (command == MMC_WRITE_MULTIPLE_BLOCK &&
@@ -1199,6 +1217,8 @@ static struct soc_device_attribute soc_fixup_sdhc_clkdivs[] = {
 
 static struct soc_device_attribute soc_unreliable_pulse_detection[] = {
 	{ .family = "QorIQ LX2160A", .revision = "1.0", },
+	{ .family = "QorIQ LX2160A", .revision = "2.0", },
+	{ .family = "QorIQ LS1028A", .revision = "1.0", },
 	{ },
 };
 
@@ -1239,8 +1259,10 @@ static void esdhc_init(struct platform_device *pdev, struct sdhci_host *host)
 		esdhc->clk_fixup = match->data;
 	np = pdev->dev.of_node;
 
-	if (of_device_is_compatible(np, "fsl,p2020-esdhc"))
+	if (of_device_is_compatible(np, "fsl,p2020-esdhc")) {
 		esdhc->quirk_delay_before_data_reset = true;
+		esdhc->quirk_trans_complete_erratum = true;
+	}
 
 	clk = of_clk_get(np, 0);
 	if (!IS_ERR(clk)) {

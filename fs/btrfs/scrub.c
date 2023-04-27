@@ -3560,7 +3560,26 @@ int scrub_enumerate_chunks(struct scrub_ctx *sctx,
 		 * -> btrfs_scrub_pause()
 		 */
 		scrub_pause_on(fs_info);
-		ret = btrfs_inc_block_group_ro(cache);
+
+		/*
+		 * Don't do chunk preallocation for scrub.
+		 *
+		 * This is especially important for SYSTEM bgs, or we can hit
+		 * -EFBIG from btrfs_finish_chunk_alloc() like:
+		 * 1. The only SYSTEM bg is marked RO.
+		 *    Since SYSTEM bg is small, that's pretty common.
+		 * 2. New SYSTEM bg will be allocated
+		 *    Due to regular version will allocate new chunk.
+		 * 3. New SYSTEM bg is empty and will get cleaned up
+		 *    Before cleanup really happens, it's marked RO again.
+		 * 4. Empty SYSTEM bg get scrubbed
+		 *    We go back to 2.
+		 *
+		 * This can easily boost the amount of SYSTEM chunks if cleaner
+		 * thread can't be triggered fast enough, and use up all space
+		 * of btrfs_super_block::sys_chunk_array
+		 */
+		ret = btrfs_inc_block_group_ro(cache, false);
 		if (!ret && sctx->is_dev_replace) {
 			/*
 			 * If we are doing a device replace wait for any tasks
@@ -3717,7 +3736,7 @@ static noinline_for_stack int scrub_supers(struct scrub_ctx *sctx,
 	struct btrfs_fs_info *fs_info = sctx->fs_info;
 
 	if (test_bit(BTRFS_FS_STATE_ERROR, &fs_info->fs_state))
-		return -EIO;
+		return -EROFS;
 
 	/* Seed devices of a new filesystem has their own generation. */
 	if (scrub_dev->fs_devices != fs_info->fs_devices)
@@ -3742,50 +3761,84 @@ static noinline_for_stack int scrub_supers(struct scrub_ctx *sctx,
 	return 0;
 }
 
+static void scrub_workers_put(struct btrfs_fs_info *fs_info)
+{
+	if (refcount_dec_and_mutex_lock(&fs_info->scrub_workers_refcnt,
+					&fs_info->scrub_lock)) {
+		struct btrfs_workqueue *scrub_workers = NULL;
+		struct btrfs_workqueue *scrub_wr_comp = NULL;
+		struct btrfs_workqueue *scrub_parity = NULL;
+
+		scrub_workers = fs_info->scrub_workers;
+		scrub_wr_comp = fs_info->scrub_wr_completion_workers;
+		scrub_parity = fs_info->scrub_parity_workers;
+
+		fs_info->scrub_workers = NULL;
+		fs_info->scrub_wr_completion_workers = NULL;
+		fs_info->scrub_parity_workers = NULL;
+		mutex_unlock(&fs_info->scrub_lock);
+
+		btrfs_destroy_workqueue(scrub_workers);
+		btrfs_destroy_workqueue(scrub_wr_comp);
+		btrfs_destroy_workqueue(scrub_parity);
+	}
+}
+
 /*
  * get a reference count on fs_info->scrub_workers. start worker if necessary
  */
 static noinline_for_stack int scrub_workers_get(struct btrfs_fs_info *fs_info,
 						int is_dev_replace)
 {
+	struct btrfs_workqueue *scrub_workers = NULL;
+	struct btrfs_workqueue *scrub_wr_comp = NULL;
+	struct btrfs_workqueue *scrub_parity = NULL;
 	unsigned int flags = WQ_FREEZABLE | WQ_UNBOUND;
 	int max_active = fs_info->thread_pool_size;
+	int ret = -ENOMEM;
 
-	lockdep_assert_held(&fs_info->scrub_lock);
+	if (refcount_inc_not_zero(&fs_info->scrub_workers_refcnt))
+		return 0;
 
+	scrub_workers = btrfs_alloc_workqueue(fs_info, "scrub", flags,
+					      is_dev_replace ? 1 : max_active, 4);
+	if (!scrub_workers)
+		goto fail_scrub_workers;
+
+	scrub_wr_comp = btrfs_alloc_workqueue(fs_info, "scrubwrc", flags,
+					      max_active, 2);
+	if (!scrub_wr_comp)
+		goto fail_scrub_wr_completion_workers;
+
+	scrub_parity = btrfs_alloc_workqueue(fs_info, "scrubparity", flags,
+					     max_active, 2);
+	if (!scrub_parity)
+		goto fail_scrub_parity_workers;
+
+	mutex_lock(&fs_info->scrub_lock);
 	if (refcount_read(&fs_info->scrub_workers_refcnt) == 0) {
-		ASSERT(fs_info->scrub_workers == NULL);
-		fs_info->scrub_workers = btrfs_alloc_workqueue(fs_info, "scrub",
-				flags, is_dev_replace ? 1 : max_active, 4);
-		if (!fs_info->scrub_workers)
-			goto fail_scrub_workers;
-
-		ASSERT(fs_info->scrub_wr_completion_workers == NULL);
-		fs_info->scrub_wr_completion_workers =
-			btrfs_alloc_workqueue(fs_info, "scrubwrc", flags,
-					      max_active, 2);
-		if (!fs_info->scrub_wr_completion_workers)
-			goto fail_scrub_wr_completion_workers;
-
-		ASSERT(fs_info->scrub_parity_workers == NULL);
-		fs_info->scrub_parity_workers =
-			btrfs_alloc_workqueue(fs_info, "scrubparity", flags,
-					      max_active, 2);
-		if (!fs_info->scrub_parity_workers)
-			goto fail_scrub_parity_workers;
-
+		ASSERT(fs_info->scrub_workers == NULL &&
+		       fs_info->scrub_wr_completion_workers == NULL &&
+		       fs_info->scrub_parity_workers == NULL);
+		fs_info->scrub_workers = scrub_workers;
+		fs_info->scrub_wr_completion_workers = scrub_wr_comp;
+		fs_info->scrub_parity_workers = scrub_parity;
 		refcount_set(&fs_info->scrub_workers_refcnt, 1);
-	} else {
-		refcount_inc(&fs_info->scrub_workers_refcnt);
+		mutex_unlock(&fs_info->scrub_lock);
+		return 0;
 	}
-	return 0;
+	/* Other thread raced in and created the workers for us */
+	refcount_inc(&fs_info->scrub_workers_refcnt);
+	mutex_unlock(&fs_info->scrub_lock);
 
+	ret = 0;
+	btrfs_destroy_workqueue(scrub_parity);
 fail_scrub_parity_workers:
-	btrfs_destroy_workqueue(fs_info->scrub_wr_completion_workers);
+	btrfs_destroy_workqueue(scrub_wr_comp);
 fail_scrub_wr_completion_workers:
-	btrfs_destroy_workqueue(fs_info->scrub_workers);
+	btrfs_destroy_workqueue(scrub_workers);
 fail_scrub_workers:
-	return -ENOMEM;
+	return ret;
 }
 
 int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
@@ -3796,9 +3849,7 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 	int ret;
 	struct btrfs_device *dev;
 	unsigned int nofs_flag;
-	struct btrfs_workqueue *scrub_workers = NULL;
-	struct btrfs_workqueue *scrub_wr_comp = NULL;
-	struct btrfs_workqueue *scrub_parity = NULL;
+	bool need_commit = false;
 
 	if (btrfs_fs_closing(fs_info))
 		return -EAGAIN;
@@ -3845,13 +3896,17 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 	if (IS_ERR(sctx))
 		return PTR_ERR(sctx);
 
+	ret = scrub_workers_get(fs_info, is_dev_replace);
+	if (ret)
+		goto out_free_ctx;
+
 	mutex_lock(&fs_info->fs_devices->device_list_mutex);
 	dev = btrfs_find_device(fs_info->fs_devices, devid, NULL, NULL, true);
 	if (!dev || (test_bit(BTRFS_DEV_STATE_MISSING, &dev->dev_state) &&
 		     !is_dev_replace)) {
 		mutex_unlock(&fs_info->fs_devices->device_list_mutex);
 		ret = -ENODEV;
-		goto out_free_ctx;
+		goto out;
 	}
 
 	if (!is_dev_replace && !readonly &&
@@ -3860,7 +3915,7 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 		btrfs_err_in_rcu(fs_info, "scrub: device %s is not writable",
 				rcu_str_deref(dev->name));
 		ret = -EROFS;
-		goto out_free_ctx;
+		goto out;
 	}
 
 	mutex_lock(&fs_info->scrub_lock);
@@ -3869,7 +3924,7 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 		mutex_unlock(&fs_info->scrub_lock);
 		mutex_unlock(&fs_info->fs_devices->device_list_mutex);
 		ret = -EIO;
-		goto out_free_ctx;
+		goto out;
 	}
 
 	down_read(&fs_info->dev_replace.rwsem);
@@ -3880,16 +3935,9 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 		mutex_unlock(&fs_info->scrub_lock);
 		mutex_unlock(&fs_info->fs_devices->device_list_mutex);
 		ret = -EINPROGRESS;
-		goto out_free_ctx;
+		goto out;
 	}
 	up_read(&fs_info->dev_replace.rwsem);
-
-	ret = scrub_workers_get(fs_info, is_dev_replace);
-	if (ret) {
-		mutex_unlock(&fs_info->scrub_lock);
-		mutex_unlock(&fs_info->fs_devices->device_list_mutex);
-		goto out_free_ctx;
-	}
 
 	sctx->readonly = readonly;
 	dev->scrub_ctx = sctx;
@@ -3914,6 +3962,12 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 	 */
 	nofs_flag = memalloc_nofs_save();
 	if (!is_dev_replace) {
+		u64 old_super_errors;
+
+		spin_lock(&sctx->stat_lock);
+		old_super_errors = sctx->stat.super_errors;
+		spin_unlock(&sctx->stat_lock);
+
 		btrfs_info(fs_info, "scrub: started on devid %llu", devid);
 		/*
 		 * by holding device list mutex, we can
@@ -3922,6 +3976,16 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 		mutex_lock(&fs_info->fs_devices->device_list_mutex);
 		ret = scrub_supers(sctx, dev);
 		mutex_unlock(&fs_info->fs_devices->device_list_mutex);
+
+		spin_lock(&sctx->stat_lock);
+		/*
+		 * Super block errors found, but we can not commit transaction
+		 * at current context, since btrfs_commit_transaction() needs
+		 * to pause the current running scrub (hold by ourselves).
+		 */
+		if (sctx->stat.super_errors > old_super_errors && !sctx->readonly)
+			need_commit = true;
+		spin_unlock(&sctx->stat_lock);
 	}
 
 	if (!ret)
@@ -3943,24 +4007,33 @@ int btrfs_scrub_dev(struct btrfs_fs_info *fs_info, u64 devid, u64 start,
 
 	mutex_lock(&fs_info->scrub_lock);
 	dev->scrub_ctx = NULL;
-	if (refcount_dec_and_test(&fs_info->scrub_workers_refcnt)) {
-		scrub_workers = fs_info->scrub_workers;
-		scrub_wr_comp = fs_info->scrub_wr_completion_workers;
-		scrub_parity = fs_info->scrub_parity_workers;
-
-		fs_info->scrub_workers = NULL;
-		fs_info->scrub_wr_completion_workers = NULL;
-		fs_info->scrub_parity_workers = NULL;
-	}
 	mutex_unlock(&fs_info->scrub_lock);
 
-	btrfs_destroy_workqueue(scrub_workers);
-	btrfs_destroy_workqueue(scrub_wr_comp);
-	btrfs_destroy_workqueue(scrub_parity);
+	scrub_workers_put(fs_info);
 	scrub_put_ctx(sctx);
 
-	return ret;
+	/*
+	 * We found some super block errors before, now try to force a
+	 * transaction commit, as scrub has finished.
+	 */
+	if (need_commit) {
+		struct btrfs_trans_handle *trans;
 
+		trans = btrfs_start_transaction(fs_info->tree_root, 0);
+		if (IS_ERR(trans)) {
+			ret = PTR_ERR(trans);
+			btrfs_err(fs_info,
+	"scrub: failed to start transaction to fix super block errors: %d", ret);
+			return ret;
+		}
+		ret = btrfs_commit_transaction(trans);
+		if (ret < 0)
+			btrfs_err(fs_info,
+	"scrub: failed to commit transaction to fix super block errors: %d", ret);
+	}
+	return ret;
+out:
+	scrub_workers_put(fs_info);
 out_free_ctx:
 	scrub_free_ctx(sctx);
 

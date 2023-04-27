@@ -10,6 +10,7 @@
 #include <asm/proc-fns.h>
 
 #include "common.h"
+#include "hardware.h"
 
 static inline void cpu_enter_lowpower(void)
 {
@@ -60,5 +61,7 @@ int imx_cpu_kill(unsigned int cpu)
 			return 0;
 	imx_enable_cpu(cpu, false);
 	imx_set_cpu_arg(cpu, 0);
+	if (cpu_is_imx7d())
+		imx_gpcv2_set_core1_pdn_pup_by_software(true);
 	return 1;
 }

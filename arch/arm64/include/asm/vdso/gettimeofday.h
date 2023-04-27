@@ -10,6 +10,8 @@
 #include <asm/unistd.h>
 #include <uapi/linux/time.h>
 
+#include <asm/vdso/clocksource.h>
+
 #define __VDSO_USE_SYSCALL		ULLONG_MAX
 
 #define VDSO_HAS_CLOCK_GETRES		1
@@ -71,10 +73,10 @@ static __always_inline u64 __arch_get_hw_counter(s32 clock_mode)
 	u64 res;
 
 	/*
-	 * clock_mode == 0 implies that vDSO are enabled otherwise
+	 * clock_mode != NONE implies that vDSO are enabled otherwise
 	 * fallback on syscall.
 	 */
-	if (clock_mode)
+	if (clock_mode == VDSO_CLOCKMODE_NONE)
 		return __VDSO_USE_SYSCALL;
 
 	/*
@@ -83,11 +85,7 @@ static __always_inline u64 __arch_get_hw_counter(s32 clock_mode)
 	 */
 	isb();
 	asm volatile("mrs %0, cntvct_el0" : "=r" (res) :: "memory");
-	/*
-	 * This isb() is required to prevent that the seq lock is
-	 * speculated.#
-	 */
-	isb();
+	arch_counter_enforce_ordering(res);
 
 	return res;
 }

@@ -48,6 +48,7 @@
 #include <asm/fixmap.h>
 #include <asm/swiotlb.h>
 #include <asm/rtas.h>
+#include <asm/ftrace.h>
 
 #include <mm/mmu_decl.h>
 
@@ -346,6 +347,7 @@ void free_initmem(void)
 	mark_initmem_nx();
 	init_mem_is_free = true;
 	free_initmem_default(POISON_FREE_INITMEM);
+	ftrace_free_init_tramp();
 }
 
 /**
@@ -530,7 +532,7 @@ void __flush_dcache_icache(void *p)
 	 * space occurs, before returning to user space.
 	 */
 
-	if (cpu_has_feature(MMU_FTR_TYPE_44x))
+	if (mmu_has_feature(MMU_FTR_TYPE_44x))
 		return;
 
 	invalidate_icache_range(addr, addr + PAGE_SIZE);

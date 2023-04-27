@@ -239,6 +239,28 @@ setup_cmd_nsb()
 	fi
 }
 
+setup_cmd_nsc()
+{
+	local cmd="$*"
+	local rc
+
+	run_cmd_nsc ${cmd}
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		# show user the command if not done so already
+		if [ "$VERBOSE" = "0" ]; then
+			echo "setup command: $cmd"
+		fi
+		echo "failed. stopping tests"
+		if [ "${PAUSE_ON_FAIL}" = "yes" ]; then
+			echo
+			echo "hit enter to continue"
+			read a
+		fi
+		exit $rc
+	fi
+}
+
 # set sysctl values in NS-A
 set_sysctl()
 {
@@ -441,6 +463,36 @@ setup()
 	# tell ns-B how to get to remote addresses of ns-A
 	ip -netns ${NSB} ro add ${NSA_LO_IP}/32 via ${NSA_IP} dev ${NSB_DEV}
 	ip -netns ${NSB} ro add ${NSA_LO_IP6}/128 via ${NSA_IP6} dev ${NSB_DEV}
+
+	set +e
+
+	sleep 1
+}
+
+setup_lla_only()
+{
+	# make sure we are starting with a clean slate
+	kill_procs
+	cleanup 2>/dev/null
+
+	log_debug "Configuring network namespaces"
+	set -e
+
+	create_ns ${NSA} "-" "-"
+	create_ns ${NSB} "-" "-"
+	create_ns ${NSC} "-" "-"
+	connect_ns ${NSA} ${NSA_DEV} "-" "-" \
+		   ${NSB} ${NSB_DEV} "-" "-"
+	connect_ns ${NSA} ${NSA_DEV2} "-" "-" \
+		   ${NSC} ${NSC_DEV}  "-" "-"
+
+	NSA_LINKIP6=$(get_linklocal ${NSA} ${NSA_DEV})
+	NSB_LINKIP6=$(get_linklocal ${NSB} ${NSB_DEV})
+	NSC_LINKIP6=$(get_linklocal ${NSC} ${NSC_DEV})
+
+	create_vrf ${NSA} ${VRF} ${VRF_TABLE} "-" "-"
+	ip -netns ${NSA} link set dev ${NSA_DEV} vrf ${VRF}
+	ip -netns ${NSA} link set dev ${NSA_DEV2} vrf ${VRF}
 
 	set +e
 
@@ -705,9 +757,15 @@ ipv4_ping()
 	setup
 	set_sysctl net.ipv4.raw_l3mdev_accept=1 2>/dev/null
 	ipv4_ping_novrf
+	setup
+	set_sysctl net.ipv4.ping_group_range='0 2147483647' 2>/dev/null
+	ipv4_ping_novrf
 
 	log_subsection "With VRF"
 	setup "yes"
+	ipv4_ping_vrf
+	setup "yes"
+	set_sysctl net.ipv4.ping_group_range='0 2147483647' 2>/dev/null
 	ipv4_ping_vrf
 }
 
@@ -1439,8 +1497,9 @@ ipv4_addr_bind_vrf()
 	for a in ${NSA_IP} ${VRF_IP}
 	do
 		log_start
+		show_hint "Socket not bound to VRF, but address is in VRF"
 		run_cmd nettest -s -R -P icmp -l ${a} -b
-		log_test_addr ${a} $? 0 "Raw socket bind to local address"
+		log_test_addr ${a} $? 1 "Raw socket bind to local address"
 
 		log_start
 		run_cmd nettest -s -R -P icmp -l ${a} -d ${NSA_DEV} -b
@@ -1832,7 +1891,7 @@ ipv6_ping_vrf()
 		log_start
 		show_hint "Fails since VRF device does not support linklocal or multicast"
 		run_cmd ${ping6} -c1 -w1 ${a}
-		log_test_addr ${a} $? 2 "ping out, VRF bind"
+		log_test_addr ${a} $? 1 "ping out, VRF bind"
 	done
 
 	for a in ${NSB_IP6} ${NSB_LO_IP6} ${NSB_LINKIP6}%${NSA_DEV} ${MCAST}%${NSA_DEV}
@@ -1952,9 +2011,15 @@ ipv6_ping()
 	log_subsection "No VRF"
 	setup
 	ipv6_ping_novrf
+	setup
+	set_sysctl net.ipv4.ping_group_range='0 2147483647' 2>/dev/null
+	ipv6_ping_novrf
 
 	log_subsection "With VRF"
 	setup "yes"
+	ipv6_ping_vrf
+	setup "yes"
+	set_sysctl net.ipv4.ping_group_range='0 2147483647' 2>/dev/null
 	ipv6_ping_vrf
 }
 
@@ -2838,11 +2903,14 @@ ipv6_addr_bind_novrf()
 	run_cmd nettest -6 -s -l ${a} -d ${NSA_DEV} -t1 -b
 	log_test_addr ${a} $? 0 "TCP socket bind to local address after device bind"
 
+	# Sadly, the kernel allows binding a socket to a device and then
+	# binding to an address not on the device. So this test passes
+	# when it really should not
 	a=${NSA_LO_IP6}
 	log_start
-	show_hint "Should fail with 'Cannot assign requested address'"
-	run_cmd nettest -6 -s -l ${a} -d ${NSA_DEV} -t1 -b
-	log_test_addr ${a} $? 1 "TCP socket bind to out of scope local address"
+	show_hint "Tecnically should fail since address is not on device but kernel allows"
+	run_cmd nettest -6 -s -l ${a} -I ${NSA_DEV} -t1 -b
+	log_test_addr ${a} $? 0 "TCP socket bind to out of scope local address"
 }
 
 ipv6_addr_bind_vrf()
@@ -2883,10 +2951,15 @@ ipv6_addr_bind_vrf()
 	run_cmd nettest -6 -s -l ${a} -d ${NSA_DEV} -t1 -b
 	log_test_addr ${a} $? 0 "TCP socket bind to local address with device bind"
 
+	# Sadly, the kernel allows binding a socket to a device and then
+	# binding to an address not on the device. The only restriction
+	# is that the address is valid in the L3 domain. So this test
+	# passes when it really should not
 	a=${VRF_IP6}
 	log_start
-	run_cmd nettest -6 -s -l ${a} -d ${NSA_DEV} -t1 -b
-	log_test_addr ${a} $? 1 "TCP socket bind to VRF address with device bind"
+	show_hint "Tecnically should fail since address is not on device but kernel allows"
+	run_cmd nettest -6 -s -l ${a} -I ${NSA_DEV} -t1 -b
+	log_test_addr ${a} $? 0 "TCP socket bind to VRF address with device bind"
 
 	a=${NSA_LO_IP6}
 	log_start
@@ -3329,10 +3402,53 @@ use_case_br()
 	setup_cmd_nsb ip li del vlan100 2>/dev/null
 }
 
+# VRF only.
+# ns-A device is connected to both ns-B and ns-C on a single VRF but only has
+# LLA on the interfaces
+use_case_ping_lla_multi()
+{
+	setup_lla_only
+	# only want reply from ns-A
+	setup_cmd_nsb sysctl -qw net.ipv6.icmp.echo_ignore_multicast=1
+	setup_cmd_nsc sysctl -qw net.ipv6.icmp.echo_ignore_multicast=1
+
+	log_start
+	run_cmd_nsb ping -c1 -w1 ${MCAST}%${NSB_DEV}
+	log_test_addr ${MCAST}%${NSB_DEV} $? 0 "Pre cycle, ping out ns-B"
+
+	run_cmd_nsc ping -c1 -w1 ${MCAST}%${NSC_DEV}
+	log_test_addr ${MCAST}%${NSC_DEV} $? 0 "Pre cycle, ping out ns-C"
+
+	# cycle/flap the first ns-A interface
+	setup_cmd ip link set ${NSA_DEV} down
+	setup_cmd ip link set ${NSA_DEV} up
+	sleep 1
+
+	log_start
+	run_cmd_nsb ping -c1 -w1 ${MCAST}%${NSB_DEV}
+	log_test_addr ${MCAST}%${NSB_DEV} $? 0 "Post cycle ${NSA} ${NSA_DEV}, ping out ns-B"
+	run_cmd_nsc ping -c1 -w1 ${MCAST}%${NSC_DEV}
+	log_test_addr ${MCAST}%${NSC_DEV} $? 0 "Post cycle ${NSA} ${NSA_DEV}, ping out ns-C"
+
+	# cycle/flap the second ns-A interface
+	setup_cmd ip link set ${NSA_DEV2} down
+	setup_cmd ip link set ${NSA_DEV2} up
+	sleep 1
+
+	log_start
+	run_cmd_nsb ping -c1 -w1 ${MCAST}%${NSB_DEV}
+	log_test_addr ${MCAST}%${NSB_DEV} $? 0 "Post cycle ${NSA} ${NSA_DEV2}, ping out ns-B"
+	run_cmd_nsc ping -c1 -w1 ${MCAST}%${NSC_DEV}
+	log_test_addr ${MCAST}%${NSC_DEV} $? 0 "Post cycle ${NSA} ${NSA_DEV2}, ping out ns-C"
+}
+
 use_cases()
 {
 	log_section "Use cases"
+	log_subsection "Device enslaved to bridge"
 	use_case_br
+	log_subsection "Ping LLA with multiple interfaces"
+	use_case_ping_lla_multi
 }
 
 ################################################################################
@@ -3355,8 +3471,8 @@ EOF
 ################################################################################
 # main
 
-TESTS_IPV4="ipv4_ping ipv4_tcp ipv4_udp ipv4_addr_bind ipv4_runtime ipv4_netfilter"
-TESTS_IPV6="ipv6_ping ipv6_tcp ipv6_udp ipv6_addr_bind ipv6_runtime ipv6_netfilter"
+TESTS_IPV4="ipv4_ping ipv4_tcp ipv4_udp ipv4_bind ipv4_runtime ipv4_netfilter"
+TESTS_IPV6="ipv6_ping ipv6_tcp ipv6_udp ipv6_bind ipv6_runtime ipv6_netfilter"
 TESTS_OTHER="use_cases"
 
 PAUSE_ON_FAIL=no

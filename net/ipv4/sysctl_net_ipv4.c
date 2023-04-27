@@ -307,24 +307,16 @@ static int proc_tcp_fastopen_key(struct ctl_table *table, int write,
 	struct ctl_table tbl = { .maxlen = ((TCP_FASTOPEN_KEY_LENGTH *
 					    2 * TCP_FASTOPEN_KEY_MAX) +
 					    (TCP_FASTOPEN_KEY_MAX * 5)) };
-	struct tcp_fastopen_context *ctx;
-	u32 user_key[TCP_FASTOPEN_KEY_MAX * 4];
-	__le32 key[TCP_FASTOPEN_KEY_MAX * 4];
+	u32 user_key[TCP_FASTOPEN_KEY_BUF_LENGTH / sizeof(u32)];
+	__le32 key[TCP_FASTOPEN_KEY_BUF_LENGTH / sizeof(__le32)];
 	char *backup_data;
-	int ret, i = 0, off = 0, n_keys = 0;
+	int ret, i = 0, off = 0, n_keys;
 
 	tbl.data = kmalloc(tbl.maxlen, GFP_KERNEL);
 	if (!tbl.data)
 		return -ENOMEM;
 
-	rcu_read_lock();
-	ctx = rcu_dereference(net->ipv4.tcp_fastopen_ctx);
-	if (ctx) {
-		n_keys = tcp_fastopen_context_len(ctx);
-		memcpy(&key[0], &ctx->key[0], TCP_FASTOPEN_KEY_LENGTH * n_keys);
-	}
-	rcu_read_unlock();
-
+	n_keys = tcp_fastopen_get_cipher(net, NULL, (u64 *)key);
 	if (!n_keys) {
 		memset(&key[0], 0, TCP_FASTOPEN_KEY_LENGTH);
 		n_keys = 1;
@@ -368,61 +360,6 @@ static int proc_tcp_fastopen_key(struct ctl_table *table, int write,
 
 bad_key:
 	kfree(tbl.data);
-	return ret;
-}
-
-static void proc_configure_early_demux(int enabled, int protocol)
-{
-	struct net_protocol *ipprot;
-#if IS_ENABLED(CONFIG_IPV6)
-	struct inet6_protocol *ip6prot;
-#endif
-
-	rcu_read_lock();
-
-	ipprot = rcu_dereference(inet_protos[protocol]);
-	if (ipprot)
-		ipprot->early_demux = enabled ? ipprot->early_demux_handler :
-						NULL;
-
-#if IS_ENABLED(CONFIG_IPV6)
-	ip6prot = rcu_dereference(inet6_protos[protocol]);
-	if (ip6prot)
-		ip6prot->early_demux = enabled ? ip6prot->early_demux_handler :
-						 NULL;
-#endif
-	rcu_read_unlock();
-}
-
-static int proc_tcp_early_demux(struct ctl_table *table, int write,
-				void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	int ret = 0;
-
-	ret = proc_dointvec(table, write, buffer, lenp, ppos);
-
-	if (write && !ret) {
-		int enabled = init_net.ipv4.sysctl_tcp_early_demux;
-
-		proc_configure_early_demux(enabled, IPPROTO_TCP);
-	}
-
-	return ret;
-}
-
-static int proc_udp_early_demux(struct ctl_table *table, int write,
-				void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	int ret = 0;
-
-	ret = proc_dointvec(table, write, buffer, lenp, ppos);
-
-	if (write && !ret) {
-		int enabled = init_net.ipv4.sysctl_udp_early_demux;
-
-		proc_configure_early_demux(enabled, IPPROTO_UDP);
-	}
-
 	return ret;
 }
 
@@ -709,14 +646,14 @@ static struct ctl_table ipv4_net_table[] = {
 		.data           = &init_net.ipv4.sysctl_udp_early_demux,
 		.maxlen         = sizeof(int),
 		.mode           = 0644,
-		.proc_handler   = proc_udp_early_demux
+		.proc_handler   = proc_douintvec_minmax,
 	},
 	{
 		.procname       = "tcp_early_demux",
 		.data           = &init_net.ipv4.sysctl_tcp_early_demux,
 		.maxlen         = sizeof(int),
 		.mode           = 0644,
-		.proc_handler   = proc_tcp_early_demux
+		.proc_handler   = proc_douintvec_minmax,
 	},
 	{
 		.procname	= "ip_default_ttl",

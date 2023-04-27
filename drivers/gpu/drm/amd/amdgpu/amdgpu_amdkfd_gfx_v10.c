@@ -165,7 +165,7 @@ static const struct kfd2kgd_calls kfd2kgd = {
 	.get_tile_config = amdgpu_amdkfd_get_tile_config,
 };
 
-struct kfd2kgd_calls *amdgpu_amdkfd_gfx_10_0_get_functions()
+struct kfd2kgd_calls *amdgpu_amdkfd_gfx_10_0_get_functions(void)
 {
 	return (struct kfd2kgd_calls *)&kfd2kgd;
 }
@@ -643,6 +643,9 @@ static int kgd_hqd_destroy(struct kgd_dev *kgd, void *mqd,
 	unsigned long end_jiffies;
 	uint32_t temp;
 	struct v10_compute_mqd *m = get_mqd(mqd);
+
+	if (amdgpu_sriov_vf(adev) && adev->in_gpu_reset)
+		return 0;
 
 #if 0
 	unsigned long flags;

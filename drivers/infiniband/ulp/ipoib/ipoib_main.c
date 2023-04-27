@@ -1979,6 +1979,8 @@ static void ipoib_ndo_uninit(struct net_device *dev)
 
 	/* no more works over the priv->wq */
 	if (priv->wq) {
+		/* See ipoib_mcast_carrier_on_task() */
+		WARN_ON(test_bit(IPOIB_FLAG_OPER_UP, &priv->flags));
 		flush_workqueue(priv->wq);
 		destroy_workqueue(priv->wq);
 		priv->wq = NULL;
@@ -2460,6 +2462,8 @@ static struct net_device *ipoib_add_port(const char *format,
 
 	/* call event handler to ensure pkey in sync */
 	queue_work(ipoib_workqueue, &priv->flush_heavy);
+
+	ndev->rtnl_link_ops = ipoib_get_link_ops();
 
 	result = register_netdev(ndev);
 	if (result) {

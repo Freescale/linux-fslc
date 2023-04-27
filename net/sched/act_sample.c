@@ -116,8 +116,6 @@ static int tcf_sample_init(struct net *net, struct nlattr *nla,
 	if (goto_ch)
 		tcf_chain_put_by_act(goto_ch);
 
-	if (ret == ACT_P_CREATED)
-		tcf_idr_insert(tn, *a);
 	return ret;
 put_chain:
 	if (goto_ch)
@@ -267,14 +265,12 @@ tcf_sample_get_group(const struct tc_action *a,
 	struct tcf_sample *s = to_sample(a);
 	struct psample_group *group;
 
-	spin_lock_bh(&s->tcf_lock);
 	group = rcu_dereference_protected(s->psample_group,
 					  lockdep_is_held(&s->tcf_lock));
 	if (group) {
 		psample_group_take(group);
 		*destructor = tcf_psample_group_put;
 	}
-	spin_unlock_bh(&s->tcf_lock);
 
 	return group;
 }

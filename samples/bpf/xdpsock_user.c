@@ -677,6 +677,7 @@ static void l2fwd(struct xsk_socket_info *xsk, struct pollfd *fds)
 	while (ret != rcvd) {
 		if (ret < 0)
 			exit_with_error(-ret);
+		complete_tx_l2fwd(xsk, fds);
 		if (xsk_ring_prod__needs_wakeup(&xsk->tx))
 			kick_tx(xsk);
 		ret = xsk_ring_prod__reserve(&xsk->tx, rcvd, &idx_tx);
@@ -781,6 +782,8 @@ int main(int argc, char **argv)
 		tx_only_all();
 	else
 		l2fwd_all();
+
+	munmap(bufs, NUM_FRAMES * opt_xsk_frame_size);
 
 	return 0;
 }

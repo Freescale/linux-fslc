@@ -155,7 +155,9 @@ void br_do_proxy_suppress_arp(struct sk_buff *skb, struct net_bridge *br,
 	if (br_opt_get(br, BROPT_NEIGH_SUPPRESS_ENABLED)) {
 		if (p && (p->flags & BR_NEIGH_SUPPRESS))
 			return;
-		if (ipv4_is_zeronet(sip) || sip == tip) {
+		if (parp->ar_op != htons(ARPOP_RREQUEST) &&
+		    parp->ar_op != htons(ARPOP_RREPLY) &&
+		    (ipv4_is_zeronet(sip) || sip == tip)) {
 			/* prevent flooding to neigh suppress ports */
 			BR_INPUT_SKB_CB(skb)->proxyarp_replied = 1;
 			return;
@@ -276,6 +278,10 @@ static void br_nd_send(struct net_bridge *br, struct net_bridge_port *p,
 	ns_olen = request->len - (skb_network_offset(request) +
 				  sizeof(struct ipv6hdr)) - sizeof(*ns);
 	for (i = 0; i < ns_olen - 1; i += (ns->opt[i + 1] << 3)) {
+		if (!ns->opt[i + 1]) {
+			kfree_skb(reply);
+			return;
+		}
 		if (ns->opt[i] == ND_OPT_SOURCE_LL_ADDR) {
 			daddr = ns->opt + i + sizeof(struct nd_opt_hdr);
 			break;

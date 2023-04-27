@@ -207,7 +207,7 @@ static int lpspi_prepare_xfer_hardware(struct spi_controller *controller)
 				spi_controller_get_devdata(controller);
 	int ret;
 
-	ret = pm_runtime_get_sync(fsl_lpspi->dev);
+	ret = pm_runtime_resume_and_get(fsl_lpspi->dev);
 	if (ret < 0) {
 		dev_err(fsl_lpspi->dev, "failed to enable clock\n");
 		return ret;
@@ -973,9 +973,6 @@ static int fsl_lpspi_remove(struct platform_device *pdev)
 				spi_controller_get_devdata(controller);
 
 	pm_runtime_disable(fsl_lpspi->dev);
-
-	spi_master_put(controller);
-
 	return 0;
 }
 

@@ -24,6 +24,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <linux/futex.h>
+#include <time.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <string.h>
@@ -615,7 +616,6 @@ int alloc_random_pkey(void)
 
 	/* allocate every possible key and make a note of which ones we got */
 	max_nr_pkey_allocs = NR_PKEYS;
-	max_nr_pkey_allocs = 1;
 	for (i = 0; i < max_nr_pkey_allocs; i++) {
 		int new_pkey = alloc_pkey();
 		if (new_pkey < 0)
@@ -1477,6 +1477,8 @@ void pkey_setup_shadow(void)
 int main(void)
 {
 	int nr_iterations = 22;
+
+	srand((unsigned int)time(NULL));
 
 	setup_handlers();
 

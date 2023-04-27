@@ -1574,6 +1574,9 @@ static void process_csb(struct intel_engine_cs *engine)
 			if (!inject_preempt_hang(execlists))
 				ring_set_paused(engine, 0);
 
+			/* XXX Magic delay for tgl */
+			ENGINE_POSTING_READ(engine, RING_CONTEXT_STATUS_PTR);
+
 			WRITE_ONCE(execlists->pending[0], NULL);
 			break;
 
@@ -2242,6 +2245,9 @@ err:
 static void lrc_destroy_wa_ctx(struct intel_engine_cs *engine)
 {
 	i915_vma_unpin_and_release(&engine->wa_ctx.vma, 0);
+
+	/* Called on error unwind, clear all flags to prevent further use */
+	memset(&engine->wa_ctx, 0, sizeof(engine->wa_ctx));
 }
 
 typedef u32 *(*wa_bb_func_t)(struct intel_engine_cs *engine, u32 *batch);
@@ -3751,6 +3757,7 @@ intel_execlists_create_virtual(struct i915_gem_context *ctx,
 	intel_engine_init_active(&ve->base, ENGINE_VIRTUAL);
 
 	intel_engine_init_execlists(&ve->base);
+	ve->base.breadcrumbs.irq_armed = true; /* fake HW, used for irq_work */
 
 	ve->base.cops = &virtual_context_ops;
 	ve->base.request_alloc = execlists_request_alloc;

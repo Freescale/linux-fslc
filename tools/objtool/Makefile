@@ -3,9 +3,6 @@ include ../scripts/Makefile.include
 include ../scripts/Makefile.arch
 
 # always use the host compiler
-HOSTAR	?= ar
-HOSTCC	?= gcc
-HOSTLD	?= ld
 AR	 = $(HOSTAR)
 CC	 = $(HOSTCC)
 LD	 = $(HOSTLD)

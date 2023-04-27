@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/msi.h>
+#include <linux/vmalloc.h>
 
 #include <asm/prom.h>
 #include <asm/io.h>
@@ -256,16 +257,19 @@ notrace void xmon_xive_do_dump(int cpu)
 	xmon_printf("\n");
 }
 
+static struct irq_data *xive_get_irq_data(u32 hw_irq)
+{
+	unsigned int irq = irq_find_mapping(xive_irq_domain, hw_irq);
+
+	return irq ? irq_get_irq_data(irq) : NULL;
+}
+
 int xmon_xive_get_irq_config(u32 hw_irq, struct irq_data *d)
 {
-	struct irq_chip *chip = irq_data_get_irq_chip(d);
 	int rc;
 	u32 target;
 	u8 prio;
 	u32 lirq;
-
-	if (!is_xive_irq(chip))
-		return -EINVAL;
 
 	rc = xive_ops->get_irq_config(hw_irq, &target, &prio, &lirq);
 	if (rc) {
@@ -275,6 +279,9 @@ int xmon_xive_get_irq_config(u32 hw_irq, struct irq_data *d)
 
 	xmon_printf("IRQ 0x%08x : target=0x%x prio=%02x lirq=0x%x ",
 		    hw_irq, target, prio, lirq);
+
+	if (!d)
+		d = xive_get_irq_data(hw_irq);
 
 	if (d) {
 		struct xive_irq_data *xd = irq_data_get_irq_handler_data(d);
@@ -983,7 +990,8 @@ static int xive_get_irqchip_state(struct irq_data *data,
 		 * interrupt to be inactive in that case.
 		 */
 		*state = (pq != XIVE_ESB_INVALID) && !xd->stale_p &&
-			(xd->saved_p || !!(pq & XIVE_ESB_VAL_P));
+			(xd->saved_p || (!!(pq & XIVE_ESB_VAL_P) &&
+			 !irqd_irq_disabled(data)));
 		return 0;
 	default:
 		return -EINVAL;
@@ -1013,12 +1021,16 @@ EXPORT_SYMBOL_GPL(is_xive_irq);
 void xive_cleanup_irq_data(struct xive_irq_data *xd)
 {
 	if (xd->eoi_mmio) {
+		unmap_kernel_range((unsigned long)xd->eoi_mmio,
+				   1u << xd->esb_shift);
 		iounmap(xd->eoi_mmio);
 		if (xd->eoi_mmio == xd->trig_mmio)
 			xd->trig_mmio = NULL;
 		xd->eoi_mmio = NULL;
 	}
 	if (xd->trig_mmio) {
+		unmap_kernel_range((unsigned long)xd->trig_mmio,
+				   1u << xd->esb_shift);
 		iounmap(xd->trig_mmio);
 		xd->trig_mmio = NULL;
 	}

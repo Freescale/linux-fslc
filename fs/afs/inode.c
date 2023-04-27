@@ -27,7 +27,6 @@
 
 static const struct inode_operations afs_symlink_inode_operations = {
 	.get_link	= page_get_link,
-	.listxattr	= afs_listxattr,
 };
 
 static noinline void dump_vnode(struct afs_vnode *vnode, struct afs_vnode *parent_vnode)
@@ -171,6 +170,7 @@ static void afs_apply_status(struct afs_fs_cursor *fc,
 	struct timespec64 t;
 	umode_t mode;
 	bool data_changed = false;
+	bool change_size = false;
 
 	BUG_ON(test_bit(AFS_VNODE_UNSET, &vnode->flags));
 
@@ -226,6 +226,7 @@ static void afs_apply_status(struct afs_fs_cursor *fc,
 		} else {
 			set_bit(AFS_VNODE_ZAP_DATA, &vnode->flags);
 		}
+		change_size = true;
 	} else if (vnode->status.type == AFS_FTYPE_DIR) {
 		/* Expected directory change is handled elsewhere so
 		 * that we can locally edit the directory and save on a
@@ -233,11 +234,19 @@ static void afs_apply_status(struct afs_fs_cursor *fc,
 		 */
 		if (test_bit(AFS_VNODE_DIR_VALID, &vnode->flags))
 			data_changed = false;
+		change_size = true;
 	}
 
 	if (data_changed) {
 		inode_set_iversion_raw(&vnode->vfs_inode, status->data_version);
-		afs_set_i_size(vnode, status->size);
+
+		/* Only update the size if the data version jumped.  If the
+		 * file is being modified locally, then we might have our own
+		 * idea of what the size should be that's not the same as
+		 * what's on the server.
+		 */
+		if (change_size)
+			afs_set_i_size(vnode, status->size);
 	}
 }
 
@@ -725,9 +734,22 @@ int afs_getattr(const struct path *path, struct kstat *stat,
 {
 	struct inode *inode = d_inode(path->dentry);
 	struct afs_vnode *vnode = AFS_FS_I(inode);
-	int seq = 0;
+	struct key *key;
+	int ret, seq = 0;
 
 	_enter("{ ino=%lu v=%u }", inode->i_ino, inode->i_generation);
+
+	if (vnode->volume &&
+	    !(query_flags & AT_STATX_DONT_SYNC) &&
+	    !test_bit(AFS_VNODE_CB_PROMISED, &vnode->flags)) {
+		key = afs_request_key(vnode->volume->cell);
+		if (IS_ERR(key))
+			return PTR_ERR(key);
+		ret = afs_validate(vnode, key);
+		key_put(key);
+		if (ret < 0)
+			return ret;
+	}
 
 	do {
 		read_seqbegin_or_lock(&vnode->cb_lock, &seq);

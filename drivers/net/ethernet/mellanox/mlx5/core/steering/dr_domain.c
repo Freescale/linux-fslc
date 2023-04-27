@@ -2,6 +2,7 @@
 /* Copyright (c) 2019 Mellanox Technologies. */
 
 #include <linux/mlx5/eswitch.h>
+#include <linux/err.h>
 #include "dr_types.h"
 
 static int dr_domain_init_cache(struct mlx5dr_domain *dmn)
@@ -64,9 +65,9 @@ static int dr_domain_init_resources(struct mlx5dr_domain *dmn)
 	}
 
 	dmn->uar = mlx5_get_uars_page(dmn->mdev);
-	if (!dmn->uar) {
+	if (IS_ERR(dmn->uar)) {
 		mlx5dr_err(dmn, "Couldn't allocate UAR\n");
-		ret = -ENOMEM;
+		ret = PTR_ERR(dmn->uar);
 		goto clean_pd;
 	}
 
@@ -222,6 +223,11 @@ static int dr_domain_caps_init(struct mlx5_core_dev *mdev,
 	ret = mlx5dr_cmd_query_device(mdev, &dmn->info.caps);
 	if (ret)
 		return ret;
+
+	if (dmn->info.caps.sw_format_ver != MLX5_STEERING_FORMAT_CONNECTX_5) {
+		mlx5dr_err(dmn, "SW steering is not supported on this device\n");
+		return -EOPNOTSUPP;
+	}
 
 	ret = dr_domain_query_fdb_caps(mdev, dmn);
 	if (ret)

@@ -164,6 +164,9 @@ static int uclogic_probe(struct hid_device *hdev,
 	struct uclogic_drvdata *drvdata = NULL;
 	bool params_initialized = false;
 
+	if (!hid_is_usb(hdev))
+		return -EINVAL;
+
 	/*
 	 * libinput requires the pad interface to be on a different node
 	 * than the pen, so use QUIRK_MULTI_INPUT for all tablets.
@@ -385,6 +388,8 @@ static const struct hid_device_id uclogic_devices[] = {
 				USB_DEVICE_ID_UCLOGIC_DRAWIMAGE_G3) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_UGTIZER,
 				USB_DEVICE_ID_UGTIZER_TABLET_GP0610) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_UGTIZER,
+				USB_DEVICE_ID_UGTIZER_TABLET_GT5040) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_UGEE,
 				USB_DEVICE_ID_UGEE_TABLET_G5) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_UGEE,

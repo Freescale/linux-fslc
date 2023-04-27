@@ -118,6 +118,10 @@ struct ftrace_likely_data {
 #define notrace			__attribute__((__no_instrument_function__))
 #endif
 
+/* Section for code which can't be instrumented at all */
+#define noinstr								\
+	noinline notrace __attribute((__section__(".noinstr.text")))
+
 /*
  * it doesn't make sense on ARM (currently the only user of __naked)
  * to trace naked functions because then mcount is called without
@@ -210,10 +214,6 @@ struct ftrace_likely_data {
 #define asm_inline asm __inline
 #else
 #define asm_inline asm
-#endif
-
-#ifndef __no_fgcse
-# define __no_fgcse
 #endif
 
 /* Are two types/vars the same type (ignoring qualifiers)? */
