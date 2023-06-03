@@ -64,6 +64,7 @@ config DRM_CDNS_MHDP
 config DRM_CDNS_HDMI
 	tristate "Cadence HDMI DRM driver"
 	depends on DRM_CDNS_MHDP
+	select DRM_DISPLAY_HDMI_HELPER
 
 config DRM_CDNS_DP
 	tristate "Cadence DP DRM driver"
