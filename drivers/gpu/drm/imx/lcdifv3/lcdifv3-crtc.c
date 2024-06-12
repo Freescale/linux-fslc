@@ -159,12 +159,14 @@ static void lcdifv3_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	if (imx_crtc_state->bus_flags & DRM_BUS_FLAG_DE_HIGH)
 		vm.flags |= DISPLAY_FLAGS_DE_HIGH;
-	else
+	if (imx_crtc_state->bus_flags & DRM_BUS_FLAG_DE_LOW)
 		vm.flags |= DISPLAY_FLAGS_DE_LOW;
 
-	if (imx_crtc_state->bus_flags & DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE)
+	if ((imx_crtc_state->bus_flags & DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE) ||
+	    (imx_crtc_state->bus_flags & DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE))
 		vm.flags |= DISPLAY_FLAGS_PIXDATA_POSEDGE;
-	else
+	if ((imx_crtc_state->bus_flags & DRM_BUS_FLAG_PIXDATA_SAMPLE_POSEDGE) ||
+	    (imx_crtc_state->bus_flags & DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE))
 		vm.flags |= DISPLAY_FLAGS_PIXDATA_NEGEDGE;
 
 	pm_runtime_get_sync(lcdifv3_crtc->dev->parent);
