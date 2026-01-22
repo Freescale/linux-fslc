@@ -15,6 +15,7 @@
 #include <linux/energy_model.h>
 #include <linux/export.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/pm_opp.h>
 #include <linux/slab.h>
 #include <linux/scmi_protocol.h>
@@ -366,6 +367,7 @@ static struct cpufreq_driver scmi_cpufreq_driver = {
 	.exit	= scmi_cpufreq_exit,
 	.register_em	= scmi_cpufreq_register_em,
 };
+
 
 static int scmi_cpufreq_probe(struct scmi_device *sdev)
 {
