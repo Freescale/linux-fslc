@@ -2488,7 +2488,6 @@ struct ct_sns_desc {
 
 enum discovery_state {
 	DSC_DELETED,
-	DSC_GNN_ID,
 	DSC_GNL,
 	DSC_LOGIN_PEND,
 	DSC_LOGIN_FAILED,
@@ -2689,25 +2688,27 @@ struct event_arg {
 /*
  * Fibre channel port/lun states.
  */
-#define FCS_UNCONFIGURED	1
-#define FCS_DEVICE_DEAD		2
-#define FCS_DEVICE_LOST		3
-#define FCS_ONLINE		4
+enum {
+	FCS_UNKNOWN,
+	FCS_UNCONFIGURED,
+	FCS_DEVICE_DEAD,
+	FCS_DEVICE_LOST,
+	FCS_ONLINE,
+};
 
 extern const char *const port_state_str[5];
 
-static const char * const port_dstate_str[] = {
-	"DELETED",
-	"GNN_ID",
-	"GNL",
-	"LOGIN_PEND",
-	"LOGIN_FAILED",
-	"GPDB",
-	"UPD_FCPORT",
-	"LOGIN_COMPLETE",
-	"ADISC",
-	"DELETE_PEND",
-	"LOGIN_AUTH_PEND",
+static const char *const port_dstate_str[] = {
+	[DSC_DELETED]		= "DELETED",
+	[DSC_GNL]		= "GNL",
+	[DSC_LOGIN_PEND]	= "LOGIN_PEND",
+	[DSC_LOGIN_FAILED]	= "LOGIN_FAILED",
+	[DSC_GPDB]		= "GPDB",
+	[DSC_UPD_FCPORT]	= "UPD_FCPORT",
+	[DSC_LOGIN_COMPLETE]	= "LOGIN_COMPLETE",
+	[DSC_ADISC]		= "ADISC",
+	[DSC_DELETE_PEND]	= "DELETE_PEND",
+	[DSC_LOGIN_AUTH_PEND]	= "LOGIN_AUTH_PEND",
 };
 
 /*
@@ -3261,11 +3262,20 @@ struct fab_scan_rp {
 	u8 node_name[8];
 };
 
+enum scan_step {
+	FAB_SCAN_START,
+	FAB_SCAN_GPNFT_FCP,
+	FAB_SCAN_GNNFT_FCP,
+	FAB_SCAN_GPNFT_NVME,
+	FAB_SCAN_GNNFT_NVME,
+};
+
 struct fab_scan {
 	struct fab_scan_rp *l;
 	u32 size;
 	u32 rscn_gen_start;
 	u32 rscn_gen_end;
+	enum scan_step step;
 	u16 scan_retry;
 #define MAX_SCAN_RETRIES 5
 	enum scan_flags_t scan_flags;
@@ -3491,10 +3501,8 @@ enum qla_work_type {
 	QLA_EVT_RELOGIN,
 	QLA_EVT_ASYNC_PRLO,
 	QLA_EVT_ASYNC_PRLO_DONE,
-	QLA_EVT_GPNFT,
-	QLA_EVT_GPNFT_DONE,
-	QLA_EVT_GNNFT_DONE,
-	QLA_EVT_GNNID,
+	QLA_EVT_SCAN_CMD,
+	QLA_EVT_SCAN_FINISH,
 	QLA_EVT_GFPNID,
 	QLA_EVT_SP_RETRY,
 	QLA_EVT_IIDMA,
