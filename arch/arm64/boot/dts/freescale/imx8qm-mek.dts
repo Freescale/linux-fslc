@@ -195,8 +195,8 @@
 		regulator-min-microvolt = <3000000>;
 		regulator-max-microvolt = <3000000>;
 		gpio = <&lsio_gpio4 7 GPIO_ACTIVE_HIGH>;
-		off-on-delay-us = <4800>;
 		enable-active-high;
+		off-on-delay-us = <4800>;
 	};
 
 	reg_can01_en: regulator-can01-gen {

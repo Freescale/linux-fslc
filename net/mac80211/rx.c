@@ -219,7 +219,7 @@ static void __ieee80211_queue_skb_to_iface(struct ieee80211_sub_if_data *sdata,
 					   struct sk_buff *skb)
 {
 	skb_queue_tail(&sdata->skb_queue, skb);
-	ieee80211_queue_work(&sdata->local->hw, &sdata->work);
+	wiphy_work_queue(sdata->local->hw.wiphy, &sdata->work);
 	if (sta)
 		sta->rx_stats.packets++;
 }
@@ -3191,6 +3191,11 @@ ieee80211_rx_h_mgmt_check(struct ieee80211_rx_data *rx)
 		return RX_DROP_MONITOR;
 
 	if (!ieee80211_is_mgmt(mgmt->frame_control))
+		return RX_DROP_MONITOR;
+
+	/* Drop non-broadcast Beacon frames */
+	if (ieee80211_is_beacon(mgmt->frame_control) &&
+	    !is_broadcast_ether_addr(mgmt->da))
 		return RX_DROP_MONITOR;
 
 	if (rx->sdata->vif.type == NL80211_IFTYPE_AP &&

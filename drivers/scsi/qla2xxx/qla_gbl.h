@@ -727,12 +727,9 @@ void qla24xx_handle_gpsc_event(scsi_qla_host_t *, struct event_arg *);
 int qla2x00_mgmt_svr_login(scsi_qla_host_t *);
 void qla24xx_handle_gffid_event(scsi_qla_host_t *vha, struct event_arg *ea);
 int qla24xx_async_gffid(scsi_qla_host_t *vha, fc_port_t *fcport, bool);
-int qla24xx_async_gpnft(scsi_qla_host_t *, u8, srb_t *);
-void qla24xx_async_gpnft_done(scsi_qla_host_t *, srb_t *);
-void qla24xx_async_gnnft_done(scsi_qla_host_t *, srb_t *);
-int qla24xx_async_gnnid(scsi_qla_host_t *, fc_port_t *);
-void qla24xx_handle_gnnid_event(scsi_qla_host_t *, struct event_arg *);
-int qla24xx_post_gnnid_work(struct scsi_qla_host *, fc_port_t *);
+int qla_fab_async_scan(scsi_qla_host_t *, srb_t *);
+void qla_fab_scan_start(struct scsi_qla_host *);
+void qla_fab_scan_finish(scsi_qla_host_t *, srb_t *);
 int qla24xx_post_gfpnid_work(struct scsi_qla_host *, fc_port_t *);
 int qla24xx_async_gfpnid(scsi_qla_host_t *, fc_port_t *);
 void qla24xx_handle_gfpnid_event(scsi_qla_host_t *, struct event_arg *);
@@ -769,7 +766,7 @@ extern int qla2x00_dfs_remove(scsi_qla_host_t *);
 
 /* Globa function prototypes for multi-q */
 extern int qla25xx_request_irq(struct qla_hw_data *, struct qla_qpair *,
-	struct qla_msix_entry *, int);
+	struct qla_msix_entry *);
 extern int qla25xx_init_req_que(struct scsi_qla_host *, struct req_que *);
 extern int qla25xx_init_rsp_que(struct scsi_qla_host *, struct rsp_que *);
 extern int qla25xx_create_req_que(struct qla_hw_data *, uint16_t, uint8_t,

@@ -2169,7 +2169,6 @@ int smb2_tree_disconnect(struct ksmbd_work *work)
 		goto err_out;
 	}
 
-	WARN_ON_ONCE(atomic_dec_and_test(&tcon->refcount));
 	tcon->t_state = TREE_DISCONNECTED;
 	write_unlock(&sess->tree_conns_lock);
 
@@ -2178,8 +2177,6 @@ int smb2_tree_disconnect(struct ksmbd_work *work)
 		rsp->hdr.Status = STATUS_NETWORK_NAME_DELETED;
 		goto err_out;
 	}
-
-	work->tcon = NULL;
 
 	rsp->StructureSize = cpu_to_le16(4);
 	err = ksmbd_iov_pin_rsp(work, rsp,
@@ -2266,7 +2263,7 @@ static noinline int create_smb2_pipe(struct ksmbd_work *work)
 {
 	struct smb2_create_rsp *rsp;
 	struct smb2_create_req *req;
-	int id;
+	int id = -1;
 	int err;
 	char *name;
 
@@ -2322,6 +2319,9 @@ out:
 		rsp->hdr.Status = STATUS_NO_MEMORY;
 		break;
 	}
+
+	if (id >= 0)
+		ksmbd_session_rpc_close(work->sess, id);
 
 	if (!IS_ERR(name))
 		kfree(name);

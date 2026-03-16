@@ -376,8 +376,10 @@ bool ni_add_subrecord(struct ntfs_inode *ni, CLST rno, struct mft_inode **mi)
 
 	mi_get_ref(&ni->mi, &m->mrec->parent_ref);
 
-	ni_add_mi(ni, m);
-	*mi = m;
+	*mi = ni_ins_mi(ni, &ni->mi_tree, m->rno, &m->node);
+	if (*mi != m)
+		mi_put(m);
+
 	return true;
 }
 
@@ -470,7 +472,7 @@ ni_ins_new_attr(struct ntfs_inode *ni, struct mft_inode *mi,
 				&ref, &le);
 		if (err) {
 			/* No memory or no space. */
-			return NULL;
+			return ERR_PTR(err);
 		}
 		le_added = true;
 
@@ -1000,6 +1002,8 @@ static int ni_ins_attr_ext(struct ntfs_inode *ni, struct ATTR_LIST_ENTRY *le,
 				       name_off, svcn, ins_le);
 		if (!attr)
 			continue;
+		if (IS_ERR(attr))
+			return PTR_ERR(attr);
 
 		if (ins_attr)
 			*ins_attr = attr;
@@ -1021,8 +1025,15 @@ insert_ext:
 
 	attr = ni_ins_new_attr(ni, mi, le, type, name, name_len, asize,
 			       name_off, svcn, ins_le);
-	if (!attr)
+	if (!attr) {
+		err = -EINVAL;
 		goto out2;
+	}
+
+	if (IS_ERR(attr)) {
+		err = PTR_ERR(attr);
+		goto out2;
+	}
 
 	if (ins_attr)
 		*ins_attr = attr;
@@ -1033,11 +1044,10 @@ insert_ext:
 
 out2:
 	ni_remove_mi(ni, mi);
-	mi_put(mi);
-	err = -EINVAL;
 
 out1:
-	ntfs_mark_rec_free(sbi, rno);
+	mi_put(mi);
+	ntfs_mark_rec_free(sbi, rno, is_mft);
 
 out:
 	return err;
@@ -1090,6 +1100,11 @@ static int ni_insert_attr(struct ntfs_inode *ni, enum ATTR_TYPE type,
 	if (asize <= free) {
 		attr = ni_ins_new_attr(ni, &ni->mi, NULL, type, name, name_len,
 				       asize, name_off, svcn, ins_le);
+		if (IS_ERR(attr)) {
+			err = PTR_ERR(attr);
+			goto out;
+		}
+
 		if (attr) {
 			if (ins_attr)
 				*ins_attr = attr;
@@ -1187,6 +1202,11 @@ static int ni_insert_attr(struct ntfs_inode *ni, enum ATTR_TYPE type,
 		goto out;
 	}
 
+	if (IS_ERR(attr)) {
+		err = PTR_ERR(attr);
+		goto out;
+	}
+
 	if (ins_attr)
 		*ins_attr = attr;
 	if (ins_mi)
@@ -1232,7 +1252,7 @@ static int ni_expand_mft_list(struct ntfs_inode *ni)
 		mft_min = mft_new;
 		mi_min = mi_new;
 	} else {
-		ntfs_mark_rec_free(sbi, mft_new);
+		ntfs_mark_rec_free(sbi, mft_new, true);
 		mft_new = 0;
 		ni_remove_mi(ni, mi_new);
 	}
@@ -1302,6 +1322,11 @@ static int ni_expand_mft_list(struct ntfs_inode *ni)
 		goto out;
 	}
 
+	if (IS_ERR(attr)) {
+		err = PTR_ERR(attr);
+		goto out;
+	}
+
 	attr->non_res = 1;
 	attr->name_off = SIZEOF_NONRESIDENT_LE;
 	attr->flags = 0;
@@ -1315,7 +1340,7 @@ static int ni_expand_mft_list(struct ntfs_inode *ni)
 
 out:
 	if (mft_new) {
-		ntfs_mark_rec_free(sbi, mft_new);
+		ntfs_mark_rec_free(sbi, mft_new, true);
 		ni_remove_mi(ni, mi_new);
 	}
 
@@ -1577,7 +1602,7 @@ int ni_delete_all(struct ntfs_inode *ni)
 		mi->dirty = true;
 		mi_write(mi, 0);
 
-		ntfs_mark_rec_free(sbi, mi->rno);
+		ntfs_mark_rec_free(sbi, mi->rno, false);
 		ni_remove_mi(ni, mi);
 		mi_put(mi);
 		node = next;
@@ -1588,7 +1613,7 @@ int ni_delete_all(struct ntfs_inode *ni)
 	ni->mi.dirty = true;
 	err = mi_write(&ni->mi, 0);
 
-	ntfs_mark_rec_free(sbi, ni->mi.rno);
+	ntfs_mark_rec_free(sbi, ni->mi.rno, false);
 
 	return err;
 }
@@ -3292,7 +3317,7 @@ int ni_write_inode(struct inode *inode, int sync, const char *hint)
 			err = err2;
 
 		if (is_empty) {
-			ntfs_mark_rec_free(sbi, mi->rno);
+			ntfs_mark_rec_free(sbi, mi->rno, false);
 			rb_erase(node, &ni->mi_tree);
 			mi_put(mi);
 		}
