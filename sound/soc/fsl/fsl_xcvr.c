@@ -1137,8 +1137,8 @@ static irqreturn_t irq0_isr(int irq, void *devid)
 		if (!xcvr->soc_data->spdif_only) {
 			/* Data RAM is 4KiB, last two pages: 8 and 9. Select page 8. */
 			regmap_update_bits(xcvr->regmap, FSL_XCVR_EXT_CTRL,
-					FSL_XCVR_EXT_CTRL_PAGE_MASK,
-					FSL_XCVR_EXT_CTRL_PAGE(8));
+					   FSL_XCVR_EXT_CTRL_PAGE_MASK,
+					   FSL_XCVR_EXT_CTRL_PAGE(8));
 
 			/* Find updated CS buffer */
 			reg_ctrl = xcvr->ram_addr + FSL_XCVR_RX_CS_CTRL_0;
@@ -1153,15 +1153,35 @@ static irqreturn_t irq0_isr(int irq, void *devid)
 			if (val) {
 				/* copy CS buffer */
 				memcpy_fromio(&xcvr->rx_iec958.status, reg_buff,
-						sizeof(xcvr->rx_iec958.status));
+					      sizeof(xcvr->rx_iec958.status));
 				for (i = 0; i < 6; i++) {
 					val = *(u32 *)(xcvr->rx_iec958.status + i*4);
 					*(u32 *)(xcvr->rx_iec958.status + i*4) =
 						bitrev32(val);
 				}
 				/* clear CS control register */
-				memset_io(reg_ctrl, 0, sizeof(val));
+				writel_relaxed(0, reg_ctrl);
 			}
+		} else {
+			regmap_read(xcvr->regmap, FSL_XCVR_RX_CS_DATA_0,
+				    (u32 *)&xcvr->rx_iec958.status[0]);
+			regmap_read(xcvr->regmap, FSL_XCVR_RX_CS_DATA_1,
+				    (u32 *)&xcvr->rx_iec958.status[4]);
+			regmap_read(xcvr->regmap, FSL_XCVR_RX_CS_DATA_2,
+				    (u32 *)&xcvr->rx_iec958.status[8]);
+			regmap_read(xcvr->regmap, FSL_XCVR_RX_CS_DATA_3,
+				    (u32 *)&xcvr->rx_iec958.status[12]);
+			regmap_read(xcvr->regmap, FSL_XCVR_RX_CS_DATA_4,
+				    (u32 *)&xcvr->rx_iec958.status[16]);
+			regmap_read(xcvr->regmap, FSL_XCVR_RX_CS_DATA_5,
+				    (u32 *)&xcvr->rx_iec958.status[20]);
+			for (i = 0; i < 6; i++) {
+				val = *(u32 *)(xcvr->rx_iec958.status + i * 4);
+				*(u32 *)(xcvr->rx_iec958.status + i * 4) =
+					bitrev32(val);
+			}
+			regmap_set_bits(xcvr->regmap, FSL_XCVR_RX_DPTH_CTRL,
+					FSL_XCVR_RX_DPTH_CTRL_CSA);
 		}
 	}
 	if (isr & FSL_XCVR_IRQ_NEW_UD) {
