@@ -1939,8 +1939,6 @@ static int lan78xx_mdio_init(struct lan78xx_net *dev)
 		dev->mdiobus->phy_mask = ~(1 << 1);
 		break;
 	case ID_REV_CHIP_ID_7801_:
-		/* scan thru PHYAD[2..0] */
-		dev->mdiobus->phy_mask = ~(0xFF);
 		break;
 	}
 
@@ -4108,18 +4106,20 @@ static int lan78xx_probe(struct usb_interface *intf,
 	period = ep_intr->desc.bInterval;
 	maxp = usb_maxpacket(dev->udev, dev->pipe_intr, 0);
 	buf = kmalloc(maxp, GFP_KERNEL);
-	if (buf) {
-		dev->urb_intr = usb_alloc_urb(0, GFP_KERNEL);
-		if (!dev->urb_intr) {
-			ret = -ENOMEM;
-			kfree(buf);
-			goto out3;
-		} else {
-			usb_fill_int_urb(dev->urb_intr, dev->udev,
-					 dev->pipe_intr, buf, maxp,
-					 intr_complete, dev, period);
-			dev->urb_intr->transfer_flags |= URB_FREE_BUFFER;
-		}
+	if (!buf) {
+		ret = -ENOMEM;
+		goto out3;
+	}
+
+	dev->urb_intr = usb_alloc_urb(0, GFP_KERNEL);
+	if (!dev->urb_intr) {
+		ret = -ENOMEM;
+		goto out4;
+	} else {
+		usb_fill_int_urb(dev->urb_intr, dev->udev,
+				 dev->pipe_intr, buf, maxp,
+				 intr_complete, dev, period);
+		dev->urb_intr->transfer_flags |= URB_FREE_BUFFER;
 	}
 
 	dev->maxpacket = usb_maxpacket(dev->udev, dev->pipe_out, 1);
@@ -4127,7 +4127,7 @@ static int lan78xx_probe(struct usb_interface *intf,
 	/* Reject broken descriptors. */
 	if (dev->maxpacket == 0) {
 		ret = -ENODEV;
-		goto out4;
+		goto out5;
 	}
 
 	/* driver requires remote-wakeup capability during autosuspend. */
@@ -4135,12 +4135,12 @@ static int lan78xx_probe(struct usb_interface *intf,
 
 	ret = lan78xx_phy_init(dev);
 	if (ret < 0)
-		goto out4;
+		goto out5;
 
 	ret = register_netdev(netdev);
 	if (ret != 0) {
 		netif_err(dev, probe, netdev, "couldn't register the device\n");
-		goto out5;
+		goto out6;
 	}
 
 	usb_set_intfdata(intf, dev);
@@ -4155,10 +4155,12 @@ static int lan78xx_probe(struct usb_interface *intf,
 
 	return 0;
 
-out5:
+out6:
 	phy_disconnect(netdev->phydev);
-out4:
+out5:
 	usb_free_urb(dev->urb_intr);
+out4:
+	kfree(buf);
 out3:
 	lan78xx_unbind(dev, intf);
 out2:
