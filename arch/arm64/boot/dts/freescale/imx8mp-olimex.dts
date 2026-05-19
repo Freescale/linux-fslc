@@ -979,16 +979,17 @@
 
 	pinctrl_csi0_pwn: csi0_pwn_grp {
 		fsl,pins = <
-			MX8MP_IOMUXC_SD1_STROBE__GPIO2_IO11	0x10
+			MX8MP_IOMUXC_GPIO1_IO05__GPIO1_IO05		0x10
 		>;
 	};
 
-	pinctrl_csi0_rst: csi0_rst_grp {
+	pinctrl_csi1_pwn: csi1_pwn_grp {
 		fsl,pins = <
 			MX8MP_IOMUXC_GPIO1_IO06__GPIO1_IO06		0x10
 		>;
 	};
 
+	/* NOTE: CSI MCLK is not pinned out on the CSI connector */
 	pinctrl_csi_mclk: csi_mclk_grp {
 		fsl,pins = <
 			MX8MP_IOMUXC_GPIO1_IO15__CCM_CLKO2	0x50
