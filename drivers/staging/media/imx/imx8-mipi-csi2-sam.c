@@ -1173,6 +1173,7 @@ static int mipi_csis_get_fmt(struct v4l2_subdev *mipi_sd,
 {
 	struct csi_state *state = mipi_sd_to_csi_state(mipi_sd);
 	struct v4l2_mbus_framefmt *mf = &state->format;
+	struct csis_pix_format const *csis_fmt;
 	struct media_pad *source_pad;
 	struct v4l2_subdev *sen_sd;
 	int ret;
@@ -1196,6 +1197,11 @@ static int mipi_csis_get_fmt(struct v4l2_subdev *mipi_sd,
 	if (ret < 0) {
 		v4l2_err(&state->sd, "%s, call get_fmt of subdev failed!\n", __func__);
 		return ret;
+	}
+
+	csis_fmt = find_csis_format(format->format.code);
+	if (csis_fmt) {
+		state->csis_fmt = csis_fmt;
 	}
 
 	memcpy(mf, &format->format, sizeof(struct v4l2_mbus_framefmt));
