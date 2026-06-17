@@ -5794,14 +5794,19 @@ static int io_poll_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
 	if (mask && !(mask & poll->events))
 		return 0;
 
+	/*
+	 * If we trigger a multishot poll off our own wakeup path,
+	 * disable multishot as there is a circular dependency between
+	 * CQ posting and triggering the event.
+	 */
+	if (mask & EPOLL_URING_WAKE)
+		poll->events |= EPOLLONESHOT;
+
 	if (io_poll_get_ownership(req)) {
-		/*
-		 * If we trigger a multishot poll off our own wakeup path,
-		 * disable multishot as there is a circular dependency between
-		 * CQ posting and triggering the event.
-		 */
-		if (mask & EPOLL_URING_WAKE)
-			poll->events |= EPOLLONESHOT;
+		if (mask && poll->events & EPOLLONESHOT) {
+			list_del_init(&poll->wait.entry);
+			smp_store_release(&poll->head, NULL);
+		}
 
 		__io_poll_execute(req, mask);
 	}
@@ -6139,26 +6144,22 @@ static int __io_poll_add(struct io_kiocb *req, unsigned int issue_flags)
 	if (!ret && ipt.error)
 		req_set_fail(req);
 	ret = ret ?: ipt.error;
-	if (ret > 0) {
+	if (ret)
 		__io_req_complete(req, issue_flags, ret, 0);
-		return ret;
-	}
-	return 0;
+	return ret;
 }
 
 static int io_poll_add(struct io_kiocb *req, unsigned int issue_flags)
 {
-	int ret;
-
-	ret = __io_poll_add(req, issue_flags);
-	return ret < 0 ? ret : 0;
+	__io_poll_add(req, issue_flags);
+	return 0;
 }
 
 static int io_poll_update(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_ring_ctx *ctx = req->ctx;
 	struct io_kiocb *preq;
-	int ret2, ret = 0;
+	int ret2 = -ECANCELED, ret = 0;
 
 	io_ring_submit_lock(ctx, !(issue_flags & IO_URING_F_NONBLOCK));
 
@@ -6189,7 +6190,7 @@ static int io_poll_update(struct io_kiocb *req, unsigned int issue_flags)
 		preq->result = ret2;
 
 	}
-	if (preq->result < 0)
+	if (ret2 < 0)
 		req_set_fail(preq);
 	io_req_complete(preq, preq->result);
 out:
@@ -7365,6 +7366,8 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		return -EINVAL;
 	if (unlikely(req->opcode >= IORING_OP_LAST))
 		return -EINVAL;
+	req->opcode = array_index_nospec(req->opcode, IORING_OP_LAST);
+
 	if (!io_check_restriction(ctx, req, sqe_flags))
 		return -EACCES;
 
