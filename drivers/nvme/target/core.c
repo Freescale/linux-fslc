@@ -932,6 +932,7 @@ bool nvmet_req_init(struct nvmet_req *req, struct nvmet_cq *cq,
 	req->metadata_sg_cnt = 0;
 	req->transfer_len = 0;
 	req->metadata_len = 0;
+	req->cqe->result.u64 = 0;
 	req->cqe->status = 0;
 	req->cqe->sq_head = 0;
 	req->ns = NULL;
@@ -1470,7 +1471,7 @@ static void nvmet_ctrl_free(struct kref *ref)
 
 	nvmet_stop_keep_alive_timer(ctrl);
 
-	flush_work(&ctrl->async_event_work);
+	cancel_work_sync(&ctrl->async_event_work);
 	cancel_work_sync(&ctrl->fatal_err_work);
 
 	ida_simple_remove(&cntlid_ida, ctrl->cntlid);
