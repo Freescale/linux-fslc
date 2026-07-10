@@ -681,6 +681,17 @@ static bool runtime_fw_status(struct se_if_priv *priv)
 
 	return fw_prsnt_n_running;
 }
+
+/**
+ * get_ele_fw_vers_word() - Get ELE firmware version word
+ *
+ * Return: Firmware version word on success, 0 on failure.
+ */
+u32 get_ele_fw_vers_word(void)
+{
+	return var_se_info.fw_vers_word;
+}
+
 /*
  * get_se_soc_id() - to fetch the soc_id of the platform
  *
