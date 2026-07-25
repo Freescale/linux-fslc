@@ -38,7 +38,7 @@
 #ifndef __FM_TEST_IOCTLS_H
 #define __FM_TEST_IOCTLS_H
 
-#include "ioctls.h"
+#include "../ioctls.h"
 
 
 /**************************************************************************//**

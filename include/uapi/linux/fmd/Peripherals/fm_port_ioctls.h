@@ -38,8 +38,7 @@
 #ifndef __FM_PORT_IOCTLS_H
 #define __FM_PORT_IOCTLS_H
 
-#include "enet_ext.h"
-#include "net_ioctls.h"
+#include "../net_ioctls.h"
 #include "fm_ioctls.h"
 #include "fm_pcd_ioctls.h"
 
@@ -742,7 +741,7 @@ typedef struct ioc_fm_port_pcd_fqids_params_t {
 #define FM_PORT_IOC_PCD_KG_UNBIND_SCHEMES _IOW(FM_IOC_TYPE_BASE, FM_PORT_IOC_NUM(31), ioc_fm_pcd_port_schemes_params_t)
 
 typedef struct ioc_fm_port_mac_addr_params_t {
-    uint8_t addr[ENET_NUM_OCTETS_PER_ADDRESS];
+    uint8_t addr[6];
 } ioc_fm_port_mac_addr_params_t;
 
 /**************************************************************************//**

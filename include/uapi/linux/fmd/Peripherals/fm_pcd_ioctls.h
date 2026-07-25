@@ -40,7 +40,7 @@
 #ifndef __FM_PCD_IOCTLS_H
 #define __FM_PCD_IOCTLS_H
 
-#include "net_ioctls.h"
+#include "../net_ioctls.h"
 #include "fm_ioctls.h"
 
 
