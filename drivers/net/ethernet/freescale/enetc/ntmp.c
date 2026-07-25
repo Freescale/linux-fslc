@@ -7,6 +7,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/fsl/netc_global.h>
 #include <linux/iopoll.h>
+#include <linux/vmalloc.h>
 
 #include "ntmp_private.h"
 
@@ -97,6 +98,12 @@ int ntmp_init_cbdr(struct netc_cbdr *cbdr, struct device *dev,
 	if (!cbdr->addr_base)
 		return -ENOMEM;
 
+	cbdr->swcbd = vcalloc(cbd_num, sizeof(struct netc_swcbd));
+	if (!cbdr->swcbd) {
+		dma_free_coherent(dev, size, cbdr->addr_base, cbdr->dma_base);
+		return -ENOMEM;
+	}
+
 	cbdr->dma_size = size;
 	cbdr->bd_num = cbd_num;
 	cbdr->regs = *regs;
@@ -107,7 +114,7 @@ int ntmp_init_cbdr(struct netc_cbdr *cbdr, struct device *dev,
 	cbdr->addr_base_align = PTR_ALIGN(cbdr->addr_base,
 					  NTMP_BASE_ADDR_ALIGN);
 
-	spin_lock_init(&cbdr->ring_lock);
+	mutex_init(&cbdr->ring_lock);
 
 	ntmp_enable_cbdr(cbdr);
 
@@ -115,10 +122,24 @@ int ntmp_init_cbdr(struct netc_cbdr *cbdr, struct device *dev,
 }
 EXPORT_SYMBOL_GPL(ntmp_init_cbdr);
 
+static void ntmp_free_data_mem(struct device *dev, struct netc_swcbd *swcbd)
+{
+	if (unlikely(!swcbd->buf))
+		return;
+
+	dma_free_coherent(dev, swcbd->size + NTMP_DATA_ADDR_ALIGN,
+			  swcbd->buf, swcbd->dma);
+}
+
 void ntmp_free_cbdr(struct netc_cbdr *cbdr)
 {
 	/* Disable the Control BD Ring */
 	netc_write(cbdr->regs.mr, 0);
+
+	for (int i = 0; i < cbdr->bd_num; i++)
+		ntmp_free_data_mem(cbdr->dev, &cbdr->swcbd[i]);
+
+	vfree(cbdr->swcbd);
 	dma_free_coherent(cbdr->dev, cbdr->dma_size, cbdr->addr_base,
 			  cbdr->dma_base);
 	memset(cbdr, 0, sizeof(*cbdr));
@@ -138,16 +159,19 @@ static union netc_cbd *ntmp_get_cbd(struct netc_cbdr *cbdr, int index)
 
 static void ntmp_clean_cbdr(struct netc_cbdr *cbdr)
 {
-	union netc_cbd *cbd;
-	int i;
+	int i = cbdr->next_to_clean;
 
-	i = cbdr->next_to_clean;
-	while (netc_read(cbdr->regs.cir) != i) {
-		cbd = ntmp_get_cbd(cbdr, i);
+	while ((netc_read(cbdr->regs.cir) & NETC_CBDRCIR_INDEX) != i) {
+		union netc_cbd *cbd = ntmp_get_cbd(cbdr, i);
+		struct netc_swcbd *swcbd = &cbdr->swcbd[i];
+
+		ntmp_free_data_mem(cbdr->dev, swcbd);
+		memset(swcbd, 0, sizeof(*swcbd));
 		memset(cbd, 0, sizeof(*cbd));
 		i = (i + 1) % cbdr->bd_num;
 	}
 
+	dma_wmb();
 	cbdr->next_to_clean = i;
 }
 
@@ -174,8 +198,7 @@ static int netc_xmit_ntmp_cmd_common(struct ntmp_user *user, union netc_cbd *cbd
 				     bool is_v1)
 {
 	union netc_cbd *cur_cbd;
-	struct netc_cbdr *cbdr;
-	int i, err;
+	int i, err, used_bds;
 	u16 status;
 	u32 val;
 
@@ -188,10 +211,16 @@ static int netc_xmit_ntmp_cmd_common(struct ntmp_user *user, union netc_cbd *cbd
 
 	if (unlikely(!ntmp_get_free_cbd_num(cbdr)))
 		ntmp_clean_cbdr(cbdr);
+		if (unlikely(!ntmp_get_free_cbd_num(cbdr))) {
+			ntmp_free_data_mem(cbdr->dev, swcbd);
+			return -EBUSY;
+		}
+	}
 
 	i = cbdr->next_to_use;
 	cur_cbd = ntmp_get_cbd(cbdr, i);
 	*cur_cbd = *cbd;
+	cbdr->swcbd[i] = *swcbd;
 	dma_wmb();
 
 	/* Update producer index of both software and hardware */
@@ -199,11 +228,17 @@ static int netc_xmit_ntmp_cmd_common(struct ntmp_user *user, union netc_cbd *cbd
 	cbdr->next_to_use = i;
 	netc_write(cbdr->regs.pir, i);
 
-	err = read_poll_timeout_atomic(netc_read, val, val == i,
-				       NETC_CBDR_DELAY_US, NETC_CBDR_TIMEOUT,
-				       true, cbdr->regs.cir);
+	err = read_poll_timeout(netc_read, val,
+				(val & NETC_CBDRCIR_INDEX) == i,
+				NETC_CBDR_DELAY_US, NETC_CBDR_TIMEOUT,
+				true, cbdr->regs.cir);
 	if (unlikely(err))
-		goto cbdr_unlock;
+		return err;
+
+	if (unlikely(val & NETC_CBDRCIR_SBE)) {
+		dev_err(cbdr->dev, "Command BD system bus error\n");
+		return -EIO;
+	}
 
 	dma_rmb();
 	/* Get the writeback command BD, because the caller may need
@@ -217,24 +252,25 @@ static int netc_xmit_ntmp_cmd_common(struct ntmp_user *user, union netc_cbd *cbd
 	else
 		status = le16_to_cpu(cbd->resp_hdr.error_rr) & NTMP_RESP_ERROR;
 	if (unlikely(status)) {
-		err = -EIO;
-		dev_err(user->dev, "Command BD error: 0x%04x\n", status);
+		dev_err(cbdr->dev, "Command BD error: 0x%04x\n", status);
+		return -EIO;
 	}
 
-	ntmp_clean_cbdr(cbdr);
-	dma_wmb();
+		ntmp_clean_cbdr(cbdr);
+		dma_wmb();
 
-cbdr_unlock:
-	spin_unlock_bh(&cbdr->ring_lock);
+	cbdr_unlock:
+		spin_unlock_bh(&cbdr->ring_lock);
 
-	return err;
-}
+		return err;
+	}
 
-static int netc_xmit_ntmp_cmd(struct ntmp_user *user, union netc_cbd *cbd)
-{
-	return netc_xmit_ntmp_cmd_common(user, cbd, false);
-}
+	static int netc_xmit_ntmp_cmd(struct ntmp_user *user, union netc_cbd *cbd)
+	{
+		return netc_xmit_ntmp_cmd_common(user, cbd, false);
+	}
 
+	u32 ntmp_lookup_free_eid
 u32 ntmp_lookup_free_eid(unsigned long *bitmap, u32 size)
 {
 	u32 entry_id;
@@ -303,10 +339,20 @@ static int ntmp_alloc_data_mem(struct ntmp_dma_buf *data, void **buf_align)
 	return 0;
 }
 
-static void ntmp_free_data_mem(struct ntmp_dma_buf *data)
+static int ntmp_alloc_data_mem(struct device *dev, struct netc_swcbd *swcbd,
+			       void **buf_align)
 {
-	dma_free_coherent(data->dev, data->size + NTMP_DATA_ADDR_ALIGN,
-			  data->buf, data->dma);
+	void *buf;
+
+	buf = dma_alloc_coherent(dev, swcbd->size + NTMP_DATA_ADDR_ALIGN,
+				 &swcbd->dma, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	swcbd->buf = buf;
+	*buf_align = PTR_ALIGN(buf, NTMP_DATA_ADDR_ALIGN);
+
+	return 0;
 }
 
 /* NTMP V1.0 functions */
@@ -458,37 +504,39 @@ static int ntmp_delete_entry_by_id(struct ntmp_user *user, int tbl_id,
 				   u8 tbl_ver, u32 entry_id, u32 req_len,
 				   u32 resp_len)
 {
-	struct ntmp_dma_buf data = {
-		.dev = user->dev,
+	struct netc_swcbd swcbd = {
 		.size = max(req_len, resp_len),
 	};
 	struct ntmp_req_by_eid *req;
+	struct netc_cbdr *cbdr;
 	union netc_cbd cbd;
 	int err;
 
-	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	err = ntmp_alloc_data_mem(user->dev, &swcbd, (void **)&req);
 	if (err)
 		return err;
 
 	ntmp_fill_crd_eid(req, tbl_ver, 0, 0, entry_id);
-	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(req_len, resp_len),
+	ntmp_fill_request_hdr(&cbd, swcbd.dma, NTMP_LEN(req_len, resp_len),
 			      tbl_id, NTMP_CMD_DELETE, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(user, &cbd);
+	ntmp_select_and_lock_cbdr(user, &cbdr);
+	err = netc_xmit_ntmp_cmd(cbdr, &cbd, &swcbd);
 	if (err)
 		dev_err(user->dev,
 			"Failed to delete entry 0x%x of %s, err: %pe",
 			entry_id, ntmp_table_name(tbl_id), ERR_PTR(err));
-
-	ntmp_free_data_mem(&data);
+	ntmp_unlock_cbdr(cbdr);
 
 	return err;
 }
 
-static int ntmp_query_entry_by_id(struct ntmp_user *user, int tbl_id,
-				  u32 len, struct ntmp_req_by_eid *req,
-				  dma_addr_t dma, bool compare_eid)
+static int ntmp_query_entry_by_id(struct netc_cbdr *cbdr, int tbl_id,
+				  struct ntmp_req_by_eid *req,
+				  struct netc_swcbd *swcbd,
+				  bool compare_eid)
 {
+	u32 len = NTMP_LEN(sizeof(*req), swcbd->size);
 	struct ntmp_cmn_resp_query *resp;
 	int cmd = NTMP_CMD_QUERY;
 	union netc_cbd cbd;
@@ -500,10 +548,11 @@ static int ntmp_query_entry_by_id(struct ntmp_user *user, int tbl_id,
 		cmd = NTMP_CMD_QU;
 
 	/* Request header */
-	ntmp_fill_request_hdr(&cbd, dma, len, tbl_id, cmd, NTMP_AM_ENTRY_ID);
-	err = netc_xmit_ntmp_cmd(user, &cbd);
+	ntmp_fill_request_hdr(&cbd, swcbd->dma, len, tbl_id, cmd,
+			      NTMP_AM_ENTRY_ID);
+	err = netc_xmit_ntmp_cmd(cbdr, &cbd, swcbd);
 	if (err) {
-		dev_err(user->dev,
+		dev_err(cbdr->dev,
 			"Failed to query entry 0x%x of %s, err: %pe\n",
 			entry_id, ntmp_table_name(tbl_id), ERR_PTR(err));
 		return err;
@@ -517,7 +566,7 @@ static int ntmp_query_entry_by_id(struct ntmp_user *user, int tbl_id,
 
 	resp = (struct ntmp_cmn_resp_query *)req;
 	if (unlikely(le32_to_cpu(resp->entry_id) != entry_id)) {
-		dev_err(user->dev,
+		dev_err(cbdr->dev,
 			"%s: query EID 0x%x doesn't match response EID 0x%x\n",
 			ntmp_table_name(tbl_id), entry_id, le32_to_cpu(resp->entry_id));
 		return -EIO;
@@ -529,15 +578,15 @@ static int ntmp_query_entry_by_id(struct ntmp_user *user, int tbl_id,
 int ntmp_maft_add_entry(struct ntmp_user *user, u32 entry_id,
 			struct maft_entry_data *maft)
 {
-	struct ntmp_dma_buf data = {
-		.dev = user->dev,
+	struct netc_swcbd swcbd = {
 		.size = sizeof(struct maft_req_add),
 	};
 	struct maft_req_add *req;
+	struct netc_cbdr *cbdr;
 	union netc_cbd cbd;
 	int err;
 
-	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	err = ntmp_alloc_data_mem(user->dev, &swcbd, (void **)&req);
 	if (err)
 		return err;
 
@@ -546,14 +595,15 @@ int ntmp_maft_add_entry(struct ntmp_user *user, u32 entry_id,
 	req->keye = maft->keye;
 	req->cfge = maft->cfge;
 
-	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+	ntmp_fill_request_hdr(&cbd, swcbd.dma, NTMP_LEN(swcbd.size, 0),
 			      NTMP_MAFT_ID, NTMP_CMD_ADD, NTMP_AM_ENTRY_ID);
-	err = netc_xmit_ntmp_cmd(user, &cbd);
+
+	ntmp_select_and_lock_cbdr(user, &cbdr);
+	err = netc_xmit_ntmp_cmd(cbdr, &cbd, &swcbd);
 	if (err)
 		dev_err(user->dev, "Failed to add MAFT entry 0x%x, err: %pe\n",
 			entry_id, ERR_PTR(err));
-
-	ntmp_free_data_mem(&data);
+	ntmp_unlock_cbdr(cbdr);
 
 	return err;
 }
@@ -562,31 +612,31 @@ EXPORT_SYMBOL_GPL(ntmp_maft_add_entry);
 int ntmp_maft_query_entry(struct ntmp_user *user, u32 entry_id,
 			  struct maft_entry_data *maft)
 {
-	struct ntmp_dma_buf data = {
-		.dev = user->dev,
+	struct netc_swcbd swcbd = {
 		.size = sizeof(struct maft_resp_query),
 	};
 	struct maft_resp_query *resp;
 	struct ntmp_req_by_eid *req;
+	struct netc_cbdr *cbdr;
 	int err;
 
-	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	err = ntmp_alloc_data_mem(user->dev, &swcbd, (void **)&req);
 	if (err)
 		return err;
 
 	ntmp_fill_crd_eid(req, user->tbl.maft_ver, 0, 0, entry_id);
-	err = ntmp_query_entry_by_id(user, NTMP_MAFT_ID,
-				     NTMP_LEN(sizeof(*req), data.size),
-				     req, data.dma, true);
+
+	ntmp_select_and_lock_cbdr(user, &cbdr);
+	err = ntmp_query_entry_by_id(cbdr, NTMP_MAFT_ID, req, &swcbd, true);
 	if (err)
-		goto end;
+		goto unlock_cbdr;
 
 	resp = (struct maft_resp_query *)req;
 	maft->keye = resp->keye;
 	maft->cfge = resp->cfge;
 
-end:
-	ntmp_free_data_mem(&data);
+unlock_cbdr:
+	ntmp_unlock_cbdr(cbdr);
 
 	return err;
 }
@@ -602,8 +652,9 @@ EXPORT_SYMBOL_GPL(ntmp_maft_delete_entry);
 int ntmp_rsst_update_entry(struct ntmp_user *user, const u32 *table,
 			   int count)
 {
-	struct ntmp_dma_buf data = {.dev = user->dev};
 	struct rsst_req_update *req;
+	struct netc_swcbd swcbd;
+	struct netc_cbdr *cbdr;
 	union netc_cbd cbd;
 	int err, i;
 
@@ -611,8 +662,8 @@ int ntmp_rsst_update_entry(struct ntmp_user *user, const u32 *table,
 		/* HW only takes in a full 64 entry table */
 		return -EINVAL;
 
-	data.size = struct_size(req, groups, count);
-	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	swcbd.size = struct_size(req, groups, count);
+	err = ntmp_alloc_data_mem(user->dev, &swcbd, (void **)&req);
 	if (err)
 		return err;
 
@@ -622,15 +673,15 @@ int ntmp_rsst_update_entry(struct ntmp_user *user, const u32 *table,
 	for (i = 0; i < count; i++)
 		req->groups[i] = (u8)(table[i]);
 
-	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(data.size, 0),
+	ntmp_fill_request_hdr(&cbd, swcbd.dma, NTMP_LEN(swcbd.size, 0),
 			      NTMP_RSST_ID, NTMP_CMD_UPDATE, NTMP_AM_ENTRY_ID);
 
-	err = netc_xmit_ntmp_cmd(user, &cbd);
+	ntmp_select_and_lock_cbdr(user, &cbdr);
+	err = netc_xmit_ntmp_cmd(cbdr, &cbd, &swcbd);
 	if (err)
 		dev_err(user->dev, "Failed to update RSST entry, err: %pe\n",
 			ERR_PTR(err));
-
-	ntmp_free_data_mem(&data);
+	ntmp_unlock_cbdr(cbdr);
 
 	return err;
 }
@@ -638,8 +689,9 @@ EXPORT_SYMBOL_GPL(ntmp_rsst_update_entry);
 
 int ntmp_rsst_query_entry(struct ntmp_user *user, u32 *table, int count)
 {
-	struct ntmp_dma_buf data = {.dev = user->dev};
 	struct ntmp_req_by_eid *req;
+	struct netc_swcbd swcbd;
+	struct netc_cbdr *cbdr;
 	union netc_cbd cbd;
 	int err, i;
 	u8 *group;
@@ -648,21 +700,23 @@ int ntmp_rsst_query_entry(struct ntmp_user *user, u32 *table, int count)
 		/* HW only takes in a full 64 entry table */
 		return -EINVAL;
 
-	data.size = NTMP_ENTRY_ID_SIZE + RSST_STSE_DATA_SIZE(count) +
-		    RSST_CFGE_DATA_SIZE(count);
-	err = ntmp_alloc_data_mem(&data, (void **)&req);
+	swcbd.size = NTMP_ENTRY_ID_SIZE + RSST_STSE_DATA_SIZE(count) +
+		     RSST_CFGE_DATA_SIZE(count);
+	err = ntmp_alloc_data_mem(user->dev, &swcbd, (void **)&req);
 	if (err)
 		return err;
 
 	/* Set the request data buffer */
 	ntmp_fill_crd_eid(req, user->tbl.rsst_ver, 0, 0, 0);
-	ntmp_fill_request_hdr(&cbd, data.dma, NTMP_LEN(sizeof(*req), data.size),
+	ntmp_fill_request_hdr(&cbd, swcbd.dma, NTMP_LEN(sizeof(*req), swcbd.size),
 			      NTMP_RSST_ID, NTMP_CMD_QUERY, NTMP_AM_ENTRY_ID);
-	err = netc_xmit_ntmp_cmd(user, &cbd);
+
+	ntmp_select_and_lock_cbdr(user, &cbdr);
+	err = netc_xmit_ntmp_cmd(cbdr, &cbd, &swcbd);
 	if (err) {
 		dev_err(user->dev, "Failed to query RSST entry, err: %pe\n",
 			ERR_PTR(err));
-		goto end;
+		goto unlock_cbdr;
 	}
 
 	group = (u8 *)req;
@@ -670,8 +724,8 @@ int ntmp_rsst_query_entry(struct ntmp_user *user, u32 *table, int count)
 	for (i = 0; i < count; i++)
 		table[i] = group[i];
 
-end:
-	ntmp_free_data_mem(&data);
+unlock_cbdr:
+	ntmp_unlock_cbdr(cbdr);
 
 	return err;
 }

@@ -67,13 +67,6 @@ union netc_cbd {
 	} req_v1; /* NTMP Request Format for version 1.0 */
 };
 
-struct ntmp_dma_buf {
-	struct device *dev;
-	size_t size;
-	void *buf;
-	dma_addr_t dma;
-};
-
 struct ntmp_cmn_req_data {
 	__le16 update_act;
 	u8 dbg_opt;
