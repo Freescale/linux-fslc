@@ -27,6 +27,8 @@ static int simple_pm_bus_probe(struct platform_device *pdev)
 	struct simple_pm_bus *bus;
 	const struct of_dev_auxdata *lookup = dev_get_platdata(&pdev->dev);
 	struct device_node *np = pdev->dev.of_node;
+	struct device *dev = &pdev->dev;
+	const struct of_device_id *match;
 
 	/*
 	 * Allow user to use driver_override to bind this driver to a
