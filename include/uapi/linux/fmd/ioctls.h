@@ -40,8 +40,9 @@
 #define __IOCTLS_H__
 
 #include <asm/ioctl.h>
+#include <linux/types.h>
 
-#include "integration_ioctls.h"
+#include "integrations/integration_ioctls.h"
 
 
 /**************************************************************************//**

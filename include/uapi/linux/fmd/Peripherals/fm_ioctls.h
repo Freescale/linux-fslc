@@ -38,6 +38,7 @@
 #ifndef __FM_IOCTLS_H
 #define __FM_IOCTLS_H
 
+#include <linux/types.h>
 
 /**************************************************************************//**
  @Group         lnx_ioctl_FM_grp Frame Manager Linux IOCTL API
