@@ -340,6 +340,7 @@ void rxe_rcv(struct sk_buff *skb)
 	if (unlikely(!rxe_opcode[pkt->opcode].mask ||
 		     !rxe_opcode[pkt->opcode].length))
 		goto drop;
+	
 	if (unlikely(pkt->paylen < header_size(pkt) + bth_pad(pkt) +
 		       RXE_ICRC_SIZE))
 		goto drop;
