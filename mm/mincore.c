@@ -53,11 +53,6 @@ static unsigned char mincore_swap(swp_entry_t entry, bool shmem)
 	struct folio *folio = NULL;
 	unsigned char present = 0;
 
-	if (!IS_ENABLED(CONFIG_SWAP)) {
-		WARN_ON(1);
-		return 0;
-	}
-
 	/*
 	 * Shmem mapping may contain swapin error entries, which are
 	 * absent. Page table may contain migration or hwpoison
@@ -65,6 +60,11 @@ static unsigned char mincore_swap(swp_entry_t entry, bool shmem)
 	 */
 	if (non_swap_entry(entry))
 		return !shmem;
+
+	if (!IS_ENABLED(CONFIG_SWAP)) {
+		WARN_ON(1);
+		return 0;
+	}
 
 	/*
 	 * Shmem mapping lookup is lockless, so we need to grab the swap
