@@ -237,6 +237,12 @@ M(NPC_MCAM_READ_BASE_RULE, 0x6011, npc_read_base_steer_rule,            \
 M(NPC_MCAM_GET_STATS, 0x6012, npc_mcam_entry_stats,                     \
 				   npc_mcam_get_stats_req,              \
 				   npc_mcam_get_stats_rsp)              \
+M(NPC_GET_SECRET_KEY, 0x6013, npc_get_secret_key,                     \
+				   npc_get_secret_key_req,              \
+				   npc_get_secret_key_rsp)              \
+M(NPC_GET_FIELD_STATUS, 0x6014, npc_get_field_status,                     \
+				   npc_get_field_status_req,              \
+				   npc_get_field_status_rsp)              \
 /* NIX mbox IDs (range 0x8000 - 0xFFFF) */				\
 M(NIX_LF_ALLOC,		0x8000, nix_lf_alloc,				\
 				 nix_lf_alloc_req, nix_lf_alloc_rsp)	\
@@ -416,6 +422,7 @@ struct get_hw_cap_rsp {
 	struct mbox_msghdr hdr;
 	u8 nix_fixed_txschq_mapping; /* Schq mapping fixed or flexible */
 	u8 nix_shaping;		     /* Is shaping and coloring supported */
+	u8 npc_hash_extract;	/* Is hash extract supported */
 };
 
 /* CGX mbox message formats */
@@ -1385,6 +1392,16 @@ struct npc_mcam_get_stats_rsp {
 	u8 stat_ena; /* enabled */
 };
 
+struct npc_get_secret_key_req {
+	struct mbox_msghdr hdr;
+	u8 intf;
+};
+
+struct npc_get_secret_key_rsp {
+	struct mbox_msghdr hdr;
+	u64 secret_key[3];
+};
+
 enum ptp_op {
 	PTP_OP_ADJFINE = 0,
 	PTP_OP_GET_CLOCK = 1,
@@ -1399,6 +1416,17 @@ struct ptp_req {
 struct ptp_rsp {
 	struct mbox_msghdr hdr;
 	u64 clk;
+};
+
+struct npc_get_field_status_req {
+	struct mbox_msghdr hdr;
+	u8 intf;
+	u8 field;
+};
+
+struct npc_get_field_status_rsp {
+	struct mbox_msghdr hdr;
+	u8 enable;
 };
 
 struct set_vf_perm  {

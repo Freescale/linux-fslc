@@ -722,7 +722,7 @@ dequeue_mid(struct mid_q_entry *mid, bool malformed)
 static unsigned int
 smb2_get_credits_from_hdr(char *buffer, struct TCP_Server_Info *server)
 {
-	struct smb2_sync_hdr *shdr = (struct smb2_sync_hdr *)buffer;
+	struct smb2_hdr *shdr = (struct smb2_hdr *)buffer;
 
 	/*
 	 * SMB1 does not use credits.
@@ -890,19 +890,18 @@ int
 cifs_handle_standard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 {
 	char *buf = server->large_buf ? server->bigbuf : server->smallbuf;
-	int length;
+	int rc;
 
 	/*
 	 * We know that we received enough to get to the MID as we
 	 * checked the pdu_length earlier. Now check to see
-	 * if the rest of the header is OK. We borrow the length
-	 * var for the rest of the loop to avoid a new stack var.
+	 * if the rest of the header is OK.
 	 *
 	 * 48 bytes is enough to display the header and a little bit
 	 * into the payload for debugging purposes.
 	 */
-	length = server->ops->check_message(buf, server->total_read, server);
-	if (length != 0)
+	rc = server->ops->check_message(buf, server->total_read, server);
+	if (rc)
 		cifs_dump_mem("Bad SMB: ", buf,
 			min_t(unsigned int, server->total_read, 48));
 
@@ -917,16 +916,16 @@ cifs_handle_standard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 		return -1;
 
 	if (!mid)
-		return length;
+		return rc;
 
-	handle_mid(mid, server, buf, length);
+	handle_mid(mid, server, buf, rc);
 	return 0;
 }
 
 static void
 smb2_add_credits_from_hdr(char *buffer, struct TCP_Server_Info *server)
 {
-	struct smb2_sync_hdr *shdr = (struct smb2_sync_hdr *)buffer;
+	struct smb2_hdr *shdr = (struct smb2_hdr *)buffer;
 	int scredits, in_flight;
 
 	/*
@@ -1664,7 +1663,7 @@ cifs_setup_ipc(struct cifs_ses *ses, struct smb3_fs_context *ctx)
 		}
 	}
 
-	tcon = tconInfoAlloc();
+	tcon = tconInfoAlloc(netfs_trace_tcon_ref_new_ipc);
 	if (tcon == NULL)
 		return -ENOMEM;
 
@@ -1679,7 +1678,7 @@ cifs_setup_ipc(struct cifs_ses *ses, struct smb3_fs_context *ctx)
 
 	if (rc) {
 		cifs_server_dbg(VFS, "failed to connect to IPC (rc=%d)\n", rc);
-		tconInfoFree(tcon);
+		tconInfoFree(tcon, netfs_trace_tcon_ref_free_ipc_fail);
 		goto out;
 	}
 
@@ -1710,7 +1709,7 @@ cifs_free_ipc(struct cifs_ses *ses)
 	if (tcon == NULL)
 		return 0;
 
-	tconInfoFree(tcon);
+	tconInfoFree(tcon, netfs_trace_tcon_ref_free_ipc);
 	ses->tcon_ipc = NULL;
 	return 0;
 }
@@ -2115,6 +2114,8 @@ cifs_find_tcon(struct cifs_ses *ses, struct smb3_fs_context *ctx)
 		if (!match_tcon(tcon, ctx))
 			continue;
 		++tcon->tc_count;
+		trace_smb3_tcon_ref(tcon->debug_id, tcon->tc_count,
+				    netfs_trace_tcon_ref_get_find);
 		spin_unlock(&cifs_tcp_ses_lock);
 		return tcon;
 	}
@@ -2123,7 +2124,7 @@ cifs_find_tcon(struct cifs_ses *ses, struct smb3_fs_context *ctx)
 }
 
 void
-cifs_put_tcon(struct cifs_tcon *tcon)
+cifs_put_tcon(struct cifs_tcon *tcon, enum smb3_tcon_ref_trace trace)
 {
 	unsigned int xid;
 	struct cifs_ses *ses;
@@ -2138,6 +2139,7 @@ cifs_put_tcon(struct cifs_tcon *tcon)
 	ses = tcon->ses;
 	cifs_dbg(FYI, "%s: tc_count=%d\n", __func__, tcon->tc_count);
 	spin_lock(&cifs_tcp_ses_lock);
+	trace_smb3_tcon_ref(tcon->debug_id, tcon->tc_count - 1, trace);
 	if (--tcon->tc_count > 0) {
 		spin_unlock(&cifs_tcp_ses_lock);
 		return;
@@ -2165,7 +2167,7 @@ cifs_put_tcon(struct cifs_tcon *tcon)
 	_free_xid(xid);
 
 	cifs_fscache_release_super_cookie(tcon);
-	tconInfoFree(tcon);
+	tconInfoFree(tcon, netfs_trace_tcon_ref_free);
 	cifs_put_smb_ses(ses);
 }
 
@@ -2213,7 +2215,7 @@ cifs_get_tcon(struct cifs_ses *ses, struct smb3_fs_context *ctx)
 		goto out_fail;
 	}
 
-	tcon = tconInfoAlloc();
+	tcon = tconInfoAlloc(netfs_trace_tcon_ref_new);
 	if (tcon == NULL) {
 		rc = -ENOMEM;
 		goto out_fail;
@@ -2389,7 +2391,7 @@ cifs_get_tcon(struct cifs_ses *ses, struct smb3_fs_context *ctx)
 	return tcon;
 
 out_fail:
-	tconInfoFree(tcon);
+	tconInfoFree(tcon, netfs_trace_tcon_ref_free_fail);
 	return ERR_PTR(rc);
 }
 
@@ -2406,7 +2408,7 @@ cifs_put_tlink(struct tcon_link *tlink)
 	}
 
 	if (!IS_ERR(tlink_tcon(tlink)))
-		cifs_put_tcon(tlink_tcon(tlink));
+		cifs_put_tcon(tlink_tcon(tlink), netfs_trace_tcon_ref_put_tlink);
 	kfree(tlink);
 	return;
 }
@@ -2960,7 +2962,7 @@ static inline void mount_put_conns(struct mount_ctx *mnt_ctx)
 	int rc = 0;
 
 	if (mnt_ctx->tcon)
-		cifs_put_tcon(mnt_ctx->tcon);
+		cifs_put_tcon(mnt_ctx->tcon, netfs_trace_tcon_ref_put_mnt_ctx);
 	else if (mnt_ctx->ses)
 		cifs_put_smb_ses(mnt_ctx->ses);
 	else if (mnt_ctx->server)
