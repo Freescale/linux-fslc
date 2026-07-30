@@ -101,9 +101,10 @@ sesInfoFree(struct cifs_ses *buf_to_free)
 }
 
 struct cifs_tcon *
-tconInfoAlloc(void)
+tconInfoAlloc(enum smb3_tcon_ref_trace trace)
 {
 	struct cifs_tcon *ret_buf;
+	static atomic_t tcon_debug_id;
 
 	ret_buf = kzalloc(sizeof(*ret_buf), GFP_KERNEL);
 	if (!ret_buf)
@@ -116,7 +117,8 @@ tconInfoAlloc(void)
 
 	atomic_inc(&tconInfoAllocCount);
 	ret_buf->tidStatus = CifsNew;
-	++ret_buf->tc_count;
+	ret_buf->debug_id = atomic_inc_return(&tcon_debug_id);
+	ret_buf->tc_count = 1;
 	INIT_LIST_HEAD(&ret_buf->openFileList);
 	INIT_LIST_HEAD(&ret_buf->tcon_list);
 	spin_lock_init(&ret_buf->open_file_lock);
@@ -124,17 +126,19 @@ tconInfoAlloc(void)
 	spin_lock_init(&ret_buf->stat_lock);
 	atomic_set(&ret_buf->num_local_opens, 0);
 	atomic_set(&ret_buf->num_remote_opens, 0);
+	trace_smb3_tcon_ref(ret_buf->debug_id, ret_buf->tc_count, trace);
 
 	return ret_buf;
 }
 
 void
-tconInfoFree(struct cifs_tcon *buf_to_free)
+tconInfoFree(struct cifs_tcon *buf_to_free, enum smb3_tcon_ref_trace trace)
 {
 	if (buf_to_free == NULL) {
 		cifs_dbg(FYI, "Null buffer passed to tconInfoFree\n");
 		return;
 	}
+	trace_smb3_tcon_ref(buf_to_free->debug_id, buf_to_free->tc_count, trace);
 	atomic_dec(&tconInfoAllocCount);
 	kfree(buf_to_free->nativeFileSystem);
 	kfree_sensitive(buf_to_free->password);
@@ -150,7 +154,7 @@ cifs_buf_get(void)
 	 * SMB2 header is bigger than CIFS one - no problems to clean some
 	 * more bytes for CIFS.
 	 */
-	size_t buf_size = sizeof(struct smb2_sync_hdr);
+	size_t buf_size = sizeof(struct smb2_hdr);
 
 	/*
 	 * We could use negotiated size instead of max_msgsize -
@@ -357,7 +361,7 @@ checkSMB(char *buf, unsigned int total_read, struct TCP_Server_Info *server)
 	/* otherwise, there is enough to get to the BCC */
 	if (check_smb_hdr(smb))
 		return -EIO;
-	clc_len = smbCalcSize(smb, server);
+	clc_len = smbCalcSize(smb);
 
 	if (4 + rfclen != total_read) {
 		cifs_dbg(VFS, "Length read does not match RFC1001 length %d\n",

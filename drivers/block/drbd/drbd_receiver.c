@@ -507,7 +507,7 @@ static int drbd_recv_short(struct socket *sock, void *buf, size_t size, int flag
 	struct msghdr msg = {
 		.msg_flags = (flags ? flags : MSG_WAITALL | MSG_NOSIGNAL)
 	};
-	iov_iter_kvec(&msg.msg_iter, READ, &iov, 1, size);
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &iov, 1, size);
 	return sock_recvmsg(sock, &msg, msg.msg_flags);
 }
 
@@ -2023,6 +2023,11 @@ static int recv_dless_read(struct drbd_peer_device *peer_device, struct drbd_req
 		if (err)
 			return err;
 		data_size -= digest_size;
+	}
+
+	if (data_size < 0) {
+		drbd_err(peer_device, "Invalid data reply size\n");
+		return -EIO;
 	}
 
 	/* optimistically update recv_cnt.  if receiving fails below,

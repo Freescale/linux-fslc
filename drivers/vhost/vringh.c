@@ -1160,7 +1160,7 @@ static inline int copy_from_iotlb(const struct vringh *vrh, void *dst,
 	if (ret < 0)
 		return ret;
 
-	iov_iter_bvec(&iter, READ, iov, ret, len);
+	iov_iter_bvec(&iter, ITER_DEST, iov, ret, len);
 
 	ret = copy_from_iter(dst, len, &iter);
 
@@ -1179,7 +1179,7 @@ static inline int copy_to_iotlb(const struct vringh *vrh, void *dst,
 	if (ret < 0)
 		return ret;
 
-	iov_iter_bvec(&iter, WRITE, iov, ret, len);
+	iov_iter_bvec(&iter, ITER_SOURCE, iov, ret, len);
 
 	return copy_to_iter(src, len, &iter);
 }
