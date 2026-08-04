@@ -41,6 +41,11 @@
 		serial2 = &uart3;
 		serial3 = &uart4;
 		spi0 = &flexspi;
+		spi1 = &ecspi1;
+		spi2 = &ecspi2;
+		spi3 = &ecspi3;
+		can0 = &flexcan1;
+		can1 = &flexcan2;
 		isi0 = &isi_0;
 		isi1 = &isi_1;
 		csi0 = &mipi_csi_0;
