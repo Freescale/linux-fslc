@@ -40,6 +40,8 @@ struct vcc_port {
 
 	struct timer_list rx_timer;
 	struct timer_list tx_timer;
+	struct vio_dev *vdev;
+	struct kref refcnt;
 };
 
 /* Microseconds that thread will delay waiting for a vcc port ref */
@@ -103,6 +105,7 @@ static const struct ktermios vcc_tty_termios = {
 	.c_ospeed = 38400
 };
 
+static void vcc_delete(struct kref *kref);
 /**
  * vcc_table_add() - Add VCC port to the VCC table
  * @port: pointer to the VCC port
@@ -589,6 +592,8 @@ static int vcc_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 		goto free_name;
 
 	port->vio.debug = vcc_dbg_vio;
+	port->vdev = vdev;
+	kref_init(&port->refcnt);
 	vcc_ldc_cfg.debug = vcc_dbg_ldc;
 
 	rv = vio_ldc_alloc(&port->vio, &vcc_ldc_cfg, port);
@@ -682,6 +687,14 @@ static void vcc_remove(struct vio_dev *vdev)
 {
 	struct vcc_port *port = dev_get_drvdata(&vdev->dev);
 
+	kref_put(&port->refcnt, vcc_delete);
+}
+
+static void vcc_delete(struct kref *kref)
+{
+	struct vcc_port *port = container_of(kref, struct vcc_port, refcnt);
+	struct viod_dev *vdev = port->vdev;
+
 	del_timer_sync(&port->rx_timer);
 	del_timer_sync(&port->tx_timer);
 
@@ -761,12 +774,15 @@ static int vcc_open(struct tty_struct *tty, struct file *vcc_file)
 		pr_err("VCC: open: TTY ops not defined\n");
 		return -ENXIO;
 	}
+	kref_get(&port->refcnt);
 
 	return tty_port_open(tty->port, tty, vcc_file);
 }
 
 static void vcc_close(struct tty_struct *tty, struct file *vcc_file)
 {
+	struct vcc_port *port = vcc_get_ne(tty->index);
+
 	if (unlikely(tty->count > 1))
 		return;
 
@@ -776,6 +792,8 @@ static void vcc_close(struct tty_struct *tty, struct file *vcc_file)
 	}
 
 	tty_port_close(tty->port, tty, vcc_file);
+
+	kref_put(&port->refcnt, vcc_delete);
 }
 
 static void vcc_ldc_hup(struct vcc_port *port)
