@@ -18,8 +18,6 @@
 #define SGIT_MAX_CYCLE_TIME	0x3fffffffU
 #define SDU_TYPE_MPDU		1
 #define FMDT_DATA_LEN_ALIGN	4
-#define NETC_CBDRCIR_INDEX	GENMASK(9, 0)
-#define NETC_CBDRCIR_SBE	BIT(31)
 
 union netc_cbd {
 	struct {
