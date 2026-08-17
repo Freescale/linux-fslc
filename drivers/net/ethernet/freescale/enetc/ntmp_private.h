@@ -18,6 +18,8 @@
 #define SGIT_MAX_CYCLE_TIME	0x3fffffffU
 #define SDU_TYPE_MPDU		1
 #define FMDT_DATA_LEN_ALIGN	4
+#define NETC_CBDRCIR_INDEX	GENMASK(9, 0)
+#define NETC_CBDRCIR_SBE	BIT(31)
 
 union netc_cbd {
 	struct {
@@ -65,6 +67,13 @@ union netc_cbd {
 		u8 status_flags;
 #define NTMP_V1_RESP_STATUS	GENMASK(5, 0)
 	} req_v1; /* NTMP Request Format for version 1.0 */
+};
+
+struct ntmp_dma_buf {
+	struct device *dev;
+	size_t size;
+	void *buf;
+	dma_addr_t dma;
 };
 
 struct ntmp_cmn_req_data {
