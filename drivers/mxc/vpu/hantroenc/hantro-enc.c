@@ -1055,6 +1055,7 @@ static long hantro_enc_ioctl(struct file *filp, unsigned int cmd, unsigned long 
 	return err;
 }
 
+#ifdef CONFIG_COMPAT
 static long hantro_enc_ioctl32(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct hantro_enc_device *encoder = filp->private_data;
@@ -1086,6 +1087,7 @@ static long hantro_enc_ioctl32(struct file *filp, unsigned int cmd, unsigned lon
 
 	return err;
 }
+#endif
 
 static int hantro_enc_mmap(struct file *filp, struct vm_area_struct *vm)
 {
