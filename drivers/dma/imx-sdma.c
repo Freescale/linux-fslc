@@ -2503,7 +2503,6 @@ static int sdma_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct device_node *spba_bus = NULL;
-	struct device_node *spba_parent_np, *sdma_parent_np;
 	const char *fw_name;
 	int ret;
 	int irq;
@@ -2644,28 +2643,15 @@ static int sdma_probe(struct platform_device *pdev)
 			goto err_register;
 		}
 
-		sdma_parent_np = of_get_parent(np);
+		struct device_node *sdma_parent_np __free(device_node) = of_get_parent(np);
 
-		for (i = 0; i < SPBA_BUS_NUM_MAX; i++) {
-			spba_bus = of_find_compatible_node(spba_bus, NULL, "fsl,spba-bus");
-			if (!spba_bus)
-				break;
-
-			spba_parent_np = of_get_parent(spba_bus);
-			if (!strcmp(sdma_parent_np->full_name, spba_parent_np->full_name)) {
-				ret = of_address_to_resource(spba_bus, 0, &spba_res);
-				if (!ret) {
-					sdma->spba_start_addr = spba_res.start;
-					sdma->spba_end_addr = spba_res.end;
-				}
-				of_node_put(spba_bus);
-				of_node_put(spba_parent_np);
-				break;
-			}
-			of_node_put(spba_bus);
-			of_node_put(spba_parent_np);
+		spba_bus = of_get_compatible_child(sdma_parent_np, "fsl,spba-bus");
+		ret = of_address_to_resource(spba_bus, 0, &spba_res);
+		if (!ret) {
+			sdma->spba_start_addr = spba_res.start;
+			sdma->spba_end_addr = spba_res.end;
 		}
-		of_node_put(sdma_parent_np);
+		of_node_put(spba_bus);
 	}
 
 	/*

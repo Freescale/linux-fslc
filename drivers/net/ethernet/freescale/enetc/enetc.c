@@ -1979,6 +1979,7 @@ int enetc_xdp_xmit(struct net_device *ndev, int num_frames,
 		   struct xdp_frame **frames, u32 flags)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct skb_shared_info *shinfo;
 	int cpu = smp_processor_id();
 	struct enetc_bdr *tx_ring;
 	int xdp_tx_frm_cnt = 0;
@@ -1999,8 +2000,14 @@ int enetc_xdp_xmit(struct net_device *ndev, int num_frames,
 	prefetchw(ENETC_TXBD(*tx_ring, tx_ring->next_to_use));
 
 	for (k = 0; k < num_frames; k++) {
+		if (xdp_frame_has_frags(frames[k])) {
+			shinfo = xdp_get_shared_info_from_frame(frames[k]);
+			if (unlikely((shinfo->nr_frags + 1) > ENETC_MAX_SKB_FRAGS))
+				break;
+		}
+
 		if (unlikely(enetc_xdp_frame_to_xdp_tx_swbd(tx_ring, frames[k],
-							    &xdp_tx_bd_cnt))) {
+								    &xdp_tx_bd_cnt))) {
 			tx_ring->stats.xdp_tx_drops++;
 			break;
 		}
