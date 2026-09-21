@@ -763,6 +763,8 @@ int cdns_mhdp_config_video(struct cdns_mhdp_device *mhdp)
 	val = div_u64(8 * (symbol + 1), bit_per_pix) - val;
 	val += 2;
 	ret = cdns_mhdp_reg_write(mhdp, DP_VC_TABLE(15), val);
+	if (ret)
+		goto err_config_video;
 
 	switch (video->color_depth) {
 	case 6:
