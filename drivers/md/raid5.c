@@ -3587,7 +3587,7 @@ static void __add_stripe_bio(struct stripe_head *sh, struct bio *bi,
 		 sh->dev[dd_idx].sector);
 
 	if (conf->mddev->bitmap && firstwrite && !sh->batch_head) {
-		sh->bm_seq = conf->seq_flush+1;
+		sh->bm_seq = READ_ONCE(conf->seq_flush) + 1;
 		set_bit(STRIPE_BIT_DELAY, &sh->state);
 	}
 }
@@ -5807,7 +5807,7 @@ static void make_discard_request(struct mddev *mddev, struct bio *bi)
 		}
 		spin_unlock_irq(&sh->stripe_lock);
 		if (conf->mddev->bitmap) {
-			sh->bm_seq = conf->seq_flush + 1;
+			sh->bm_seq = READ_ONCE(conf->seq_flush) + 1;
 			set_bit(STRIPE_BIT_DELAY, &sh->state);
 		}
 
@@ -5971,8 +5971,11 @@ static void raid5_bitmap_sector(struct mddev *mddev, sector_t *offset,
 
 	sectors_per_chunk = conf->chunk_sectors *
 		(conf->raid_disks - conf->max_degraded);
-	start = round_down(start, sectors_per_chunk);
-	end = round_up(end, sectors_per_chunk);
+	sector_div(start, sectors_per_chunk);
+	start *= sectors_per_chunk;
+	if (sector_div(end, sectors_per_chunk))
+		end++;
+	end *= sectors_per_chunk;
 
 	start = raid5_compute_sector(conf, start, 0, &dd_idx, NULL);
 	end = raid5_compute_sector(conf, end, 0, &dd_idx, NULL);
@@ -5990,8 +5993,10 @@ static void raid5_bitmap_sector(struct mddev *mddev, sector_t *offset,
 
 	sectors_per_chunk = conf->prev_chunk_sectors *
 		(conf->previous_raid_disks - conf->max_degraded);
-	prev_start = round_down(prev_start, sectors_per_chunk);
-	prev_end = round_down(prev_end, sectors_per_chunk);
+	sector_div(prev_start, sectors_per_chunk);
+	prev_start *= sectors_per_chunk;
+	sector_div(prev_end, sectors_per_chunk);
+	prev_end *= sectors_per_chunk;
 
 	prev_start = raid5_compute_sector(conf, prev_start, 1, &dd_idx, NULL);
 	prev_end = raid5_compute_sector(conf, prev_end, 1, &dd_idx, NULL);
@@ -6847,11 +6852,13 @@ static void raid5d(struct md_thread *thread)
 		if (
 		    !list_empty(&conf->bitmap_list)) {
 			/* Now is a good time to flush some bitmap updates */
-			conf->seq_flush++;
+			int seq = conf->seq_flush + 1;
+
+			WRITE_ONCE(conf->seq_flush, seq);
 			spin_unlock_irq(&conf->device_lock);
 			md_bitmap_unplug(mddev->bitmap);
 			spin_lock_irq(&conf->device_lock);
-			conf->seq_write = conf->seq_flush;
+			conf->seq_write = seq;
 			activate_bit_delay(conf, conf->temp_inactive_list);
 		}
 		raid5_activate_delayed(conf);

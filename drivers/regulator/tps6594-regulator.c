@@ -18,10 +18,9 @@
 
 #include <linux/mfd/tps6594.h>
 
-#define BUCK_NB		5
-#define LDO_NB		4
-#define MULTI_PHASE_NB	4
-#define REGS_INT_NB	4
+#define BUCK_NB			5
+#define LDO_NB			4
+#define MULTI_PHASE_NB		4
 
 enum tps6594_regulator_id {
 	/* DCDC's */
@@ -53,7 +52,7 @@ struct tps6594_regulator_irq_type {
 	unsigned long event;
 };
 
-static struct tps6594_regulator_irq_type tps6594_ext_regulator_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_ext_regulator_irq_types[] = {
 	{ TPS6594_IRQ_NAME_VCCA_OV, "VCCA", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_VCCA_UV, "VCCA", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_VMON1_OV, "VMON1", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
@@ -66,15 +65,24 @@ static struct tps6594_regulator_irq_type tps6594_ext_regulator_irq_types[] = {
 	  REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 };
 
+static const struct tps6594_regulator_irq_type tps65224_ext_regulator_irq_types[] = {
+	{ TPS65224_IRQ_NAME_VCCA_UVOV, "VCCA", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+	{ TPS65224_IRQ_NAME_VMON1_UVOV, "VMON1", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+	{ TPS65224_IRQ_NAME_VMON2_UVOV, "VMON2", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
 struct tps6594_regulator_irq_data {
 	struct device *dev;
-	struct tps6594_regulator_irq_type *type;
+	const struct tps6594_regulator_irq_type *type;
 	struct regulator_dev *rdev;
 };
 
 struct tps6594_ext_regulator_irq_data {
 	struct device *dev;
-	struct tps6594_regulator_irq_type *type;
+	const struct tps6594_regulator_irq_type *type;
 };
 
 #define TPS6594_REGULATOR(_name, _of, _id, _type, _ops, _n, _vr, _vm, _er, \
@@ -122,6 +130,27 @@ static const struct linear_range ldos_4_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1200000, 0x20, 0x74, 25000),
 };
 
+/* Voltage range for TPS65224 Bucks and LDOs */
+static const struct linear_range tps65224_bucks_1_ranges[] = {
+	REGULATOR_LINEAR_RANGE(500000, 0x0a, 0x0e, 20000),
+	REGULATOR_LINEAR_RANGE(600000, 0x0f, 0x72, 5000),
+	REGULATOR_LINEAR_RANGE(1100000, 0x73, 0xaa, 10000),
+	REGULATOR_LINEAR_RANGE(1660000, 0xab, 0xfd, 20000),
+};
+
+static const struct linear_range tps65224_bucks_2_3_4_ranges[] = {
+	REGULATOR_LINEAR_RANGE(500000, 0x0, 0x1a, 25000),
+	REGULATOR_LINEAR_RANGE(1200000, 0x1b, 0x45, 50000),
+};
+
+static const struct linear_range tps65224_ldos_1_ranges[] = {
+	REGULATOR_LINEAR_RANGE(1200000, 0xC, 0x36, 50000),
+};
+
+static const struct linear_range tps65224_ldos_2_3_ranges[] = {
+	REGULATOR_LINEAR_RANGE(600000, 0x0, 0x38, 50000),
+};
+
 /* Operations permitted on BUCK1/2/3/4/5 */
 static const struct regulator_ops tps6594_bucks_ops = {
 	.is_enabled		= regulator_is_enabled_regmap,
@@ -159,7 +188,7 @@ static const struct regulator_ops tps6594_ldos_4_ops = {
 	.map_voltage		= regulator_map_voltage_linear_range,
 };
 
-static const struct regulator_desc buck_regs[] = {
+static const struct regulator_desc tps6594_buck_regs[] = {
 	TPS6594_REGULATOR("BUCK1", "buck1", TPS6594_BUCK_1,
 			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS6594_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_VOUT_1(0),
@@ -197,7 +226,39 @@ static const struct regulator_desc buck_regs[] = {
 			  4, 0, 0, NULL, 0, 0),
 };
 
-static struct tps6594_regulator_irq_type tps6594_buck1_irq_types[] = {
+/* Buck configuration for TPS65224 */
+static const struct regulator_desc tps65224_buck_regs[] = {
+	TPS6594_REGULATOR("BUCK1", "buck1", TPS6594_BUCK_1,
+			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCK1_VSET,
+			  TPS6594_REG_BUCKX_VOUT_1(0),
+			  TPS65224_MASK_BUCK1_VSET,
+			  TPS6594_REG_BUCKX_CTRL(0),
+			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_1_ranges,
+			  4, 0, 0, NULL, 0, 0),
+	TPS6594_REGULATOR("BUCK2", "buck2", TPS6594_BUCK_2,
+			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCKS_VSET,
+			  TPS6594_REG_BUCKX_VOUT_1(1),
+			  TPS65224_MASK_BUCKS_VSET,
+			  TPS6594_REG_BUCKX_CTRL(1),
+			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_2_3_4_ranges,
+			  4, 0, 0, NULL, 0, 0),
+	TPS6594_REGULATOR("BUCK3", "buck3", TPS6594_BUCK_3,
+			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCKS_VSET,
+			  TPS6594_REG_BUCKX_VOUT_1(2),
+			  TPS65224_MASK_BUCKS_VSET,
+			  TPS6594_REG_BUCKX_CTRL(2),
+			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_2_3_4_ranges,
+			  4, 0, 0, NULL, 0, 0),
+	TPS6594_REGULATOR("BUCK4", "buck4", TPS6594_BUCK_4,
+			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCKS_VSET,
+			  TPS6594_REG_BUCKX_VOUT_1(3),
+			  TPS65224_MASK_BUCKS_VSET,
+			  TPS6594_REG_BUCKX_CTRL(3),
+			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_2_3_4_ranges,
+			  4, 0, 0, NULL, 0, 0),
+};
+
+static const struct tps6594_regulator_irq_type tps6594_buck1_irq_types[] = {
 	{ TPS6594_IRQ_NAME_BUCK1_OV, "BUCK1", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_BUCK1_UV, "BUCK1", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_BUCK1_SC, "BUCK1", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -205,7 +266,7 @@ static struct tps6594_regulator_irq_type tps6594_buck1_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_buck2_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_buck2_irq_types[] = {
 	{ TPS6594_IRQ_NAME_BUCK2_OV, "BUCK2", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_BUCK2_UV, "BUCK2", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_BUCK2_SC, "BUCK2", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -213,7 +274,7 @@ static struct tps6594_regulator_irq_type tps6594_buck2_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_buck3_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_buck3_irq_types[] = {
 	{ TPS6594_IRQ_NAME_BUCK3_OV, "BUCK3", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_BUCK3_UV, "BUCK3", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_BUCK3_SC, "BUCK3", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -221,7 +282,7 @@ static struct tps6594_regulator_irq_type tps6594_buck3_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_buck4_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_buck4_irq_types[] = {
 	{ TPS6594_IRQ_NAME_BUCK4_OV, "BUCK4", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_BUCK4_UV, "BUCK4", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_BUCK4_SC, "BUCK4", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -229,7 +290,7 @@ static struct tps6594_regulator_irq_type tps6594_buck4_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_buck5_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_buck5_irq_types[] = {
 	{ TPS6594_IRQ_NAME_BUCK5_OV, "BUCK5", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_BUCK5_UV, "BUCK5", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_BUCK5_SC, "BUCK5", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -237,7 +298,7 @@ static struct tps6594_regulator_irq_type tps6594_buck5_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_ldo1_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_ldo1_irq_types[] = {
 	{ TPS6594_IRQ_NAME_LDO1_OV, "LDO1", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_LDO1_UV, "LDO1", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_LDO1_SC, "LDO1", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -245,7 +306,7 @@ static struct tps6594_regulator_irq_type tps6594_ldo1_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_ldo2_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_ldo2_irq_types[] = {
 	{ TPS6594_IRQ_NAME_LDO2_OV, "LDO2", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_LDO2_UV, "LDO2", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_LDO2_SC, "LDO2", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -253,7 +314,7 @@ static struct tps6594_regulator_irq_type tps6594_ldo2_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_ldo3_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_ldo3_irq_types[] = {
 	{ TPS6594_IRQ_NAME_LDO3_OV, "LDO3", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_LDO3_UV, "LDO3", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_LDO3_SC, "LDO3", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -261,7 +322,7 @@ static struct tps6594_regulator_irq_type tps6594_ldo3_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type tps6594_ldo4_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps6594_ldo4_irq_types[] = {
 	{ TPS6594_IRQ_NAME_LDO4_OV, "LDO4", "overvoltage", REGULATOR_EVENT_OVER_VOLTAGE_WARN },
 	{ TPS6594_IRQ_NAME_LDO4_UV, "LDO4", "undervoltage", REGULATOR_EVENT_UNDER_VOLTAGE },
 	{ TPS6594_IRQ_NAME_LDO4_SC, "LDO4", "short circuit", REGULATOR_EVENT_REGULATION_OUT },
@@ -269,7 +330,42 @@ static struct tps6594_regulator_irq_type tps6594_ldo4_irq_types[] = {
 	  REGULATOR_EVENT_OVER_CURRENT },
 };
 
-static struct tps6594_regulator_irq_type *tps6594_bucks_irq_types[] = {
+static const struct tps6594_regulator_irq_type tps65224_buck1_irq_types[] = {
+	{ TPS65224_IRQ_NAME_BUCK1_UVOV, "BUCK1", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type tps65224_buck2_irq_types[] = {
+	{ TPS65224_IRQ_NAME_BUCK2_UVOV, "BUCK2", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type tps65224_buck3_irq_types[] = {
+	{ TPS65224_IRQ_NAME_BUCK3_UVOV, "BUCK3", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type tps65224_buck4_irq_types[] = {
+	{ TPS65224_IRQ_NAME_BUCK4_UVOV, "BUCK4", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type tps65224_ldo1_irq_types[] = {
+	{ TPS65224_IRQ_NAME_LDO1_UVOV, "LDO1", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type tps65224_ldo2_irq_types[] = {
+	{ TPS65224_IRQ_NAME_LDO2_UVOV, "LDO2", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type tps65224_ldo3_irq_types[] = {
+	{ TPS65224_IRQ_NAME_LDO3_UVOV, "LDO3", "voltage out of range",
+	  REGULATOR_EVENT_REGULATION_OUT },
+};
+
+static const struct tps6594_regulator_irq_type *tps6594_bucks_irq_types[] = {
 	tps6594_buck1_irq_types,
 	tps6594_buck2_irq_types,
 	tps6594_buck3_irq_types,
@@ -277,14 +373,27 @@ static struct tps6594_regulator_irq_type *tps6594_bucks_irq_types[] = {
 	tps6594_buck5_irq_types,
 };
 
-static struct tps6594_regulator_irq_type *tps6594_ldos_irq_types[] = {
+static const struct tps6594_regulator_irq_type *tps6594_ldos_irq_types[] = {
 	tps6594_ldo1_irq_types,
 	tps6594_ldo2_irq_types,
 	tps6594_ldo3_irq_types,
 	tps6594_ldo4_irq_types,
 };
 
-static const struct regulator_desc multi_regs[] = {
+static const struct tps6594_regulator_irq_type *tps65224_bucks_irq_types[] = {
+	tps65224_buck1_irq_types,
+	tps65224_buck2_irq_types,
+	tps65224_buck3_irq_types,
+	tps65224_buck4_irq_types,
+};
+
+static const struct tps6594_regulator_irq_type *tps65224_ldos_irq_types[] = {
+	tps65224_ldo1_irq_types,
+	tps65224_ldo2_irq_types,
+	tps65224_ldo3_irq_types,
+};
+
+static const struct regulator_desc tps6594_multi_regs[] = {
 	TPS6594_REGULATOR("BUCK12", "buck12", TPS6594_BUCK_1,
 			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS6594_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_VOUT_1(0),
@@ -315,7 +424,17 @@ static const struct regulator_desc multi_regs[] = {
 			  4, 4000, 0, NULL, 0, 0),
 };
 
-static const struct regulator_desc ldo_regs[] = {
+static const struct regulator_desc tps65224_multi_regs[] = {
+	TPS6594_REGULATOR("BUCK12", "buck12", TPS6594_BUCK_1,
+			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCK1_VSET,
+			  TPS6594_REG_BUCKX_VOUT_1(0),
+			  TPS65224_MASK_BUCK1_VSET,
+			  TPS6594_REG_BUCKX_CTRL(0),
+			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_1_ranges,
+			  4, 4000, 0, NULL, 0, 0),
+};
+
+static const struct regulator_desc tps6594_ldo_regs[] = {
 	TPS6594_REGULATOR("LDO1", "ldo1", TPS6594_LDO_1,
 			  REGULATOR_VOLTAGE, tps6594_ldos_1_2_3_ops, TPS6594_MASK_LDO123_VSET,
 			  TPS6594_REG_LDOX_VOUT(0),
@@ -346,6 +465,30 @@ static const struct regulator_desc ldo_regs[] = {
 			  1, 0, 0, NULL, 0, 0),
 };
 
+static const struct regulator_desc tps65224_ldo_regs[] = {
+	TPS6594_REGULATOR("LDO1", "ldo1", TPS6594_LDO_1,
+			  REGULATOR_VOLTAGE, tps6594_ldos_1_2_3_ops, TPS6594_MASK_LDO123_VSET,
+			  TPS6594_REG_LDOX_VOUT(0),
+			  TPS6594_MASK_LDO123_VSET,
+			  TPS6594_REG_LDOX_CTRL(0),
+			  TPS6594_BIT_LDO_EN, 0, 0, tps65224_ldos_1_ranges,
+			  1, 0, 0, NULL, 0, TPS6594_BIT_LDO_BYPASS),
+	TPS6594_REGULATOR("LDO2", "ldo2", TPS6594_LDO_2,
+			  REGULATOR_VOLTAGE, tps6594_ldos_1_2_3_ops, TPS6594_MASK_LDO123_VSET,
+			  TPS6594_REG_LDOX_VOUT(1),
+			  TPS6594_MASK_LDO123_VSET,
+			  TPS6594_REG_LDOX_CTRL(1),
+			  TPS6594_BIT_LDO_EN, 0, 0, tps65224_ldos_2_3_ranges,
+			  1, 0, 0, NULL, 0, TPS6594_BIT_LDO_BYPASS),
+	TPS6594_REGULATOR("LDO3", "ldo3", TPS6594_LDO_3,
+			  REGULATOR_VOLTAGE, tps6594_ldos_1_2_3_ops, TPS6594_MASK_LDO123_VSET,
+			  TPS6594_REG_LDOX_VOUT(2),
+			  TPS6594_MASK_LDO123_VSET,
+			  TPS6594_REG_LDOX_CTRL(2),
+			  TPS6594_BIT_LDO_EN, 0, 0, tps65224_ldos_2_3_ranges,
+			  1, 0, 0, NULL, 0, TPS6594_BIT_LDO_BYPASS),
+};
+
 static irqreturn_t tps6594_regulator_irq_handler(int irq, void *data)
 {
 	struct tps6594_regulator_irq_data *irq_data = data;
@@ -369,17 +512,18 @@ static irqreturn_t tps6594_regulator_irq_handler(int irq, void *data)
 static int tps6594_request_reg_irqs(struct platform_device *pdev,
 				    struct regulator_dev *rdev,
 				    struct tps6594_regulator_irq_data *irq_data,
-				    struct tps6594_regulator_irq_type *tps6594_regs_irq_types,
+				    const struct tps6594_regulator_irq_type *regs_irq_types,
+				    size_t interrupt_cnt,
 				    int *irq_idx)
 {
-	struct tps6594_regulator_irq_type *irq_type;
+	const struct tps6594_regulator_irq_type *irq_type;
 	struct tps6594 *tps = dev_get_drvdata(pdev->dev.parent);
-	int j;
+	size_t j;
 	int irq;
 	int error;
 
-	for (j = 0; j < REGS_INT_NB; j++) {
-		irq_type = &tps6594_regs_irq_types[j];
+	for (j = 0; j < interrupt_cnt; j++) {
+		irq_type = &regs_irq_types[j];
 		irq = platform_get_irq_byname(pdev, irq_type->irq_name);
 		if (irq < 0)
 			return -EINVAL;
@@ -401,6 +545,63 @@ static int tps6594_request_reg_irqs(struct platform_device *pdev,
 	return 0;
 }
 
+struct tps6594_regulator_desc {
+	const struct regulator_desc *multi_phase_regs;
+	unsigned int num_multi_phase_regs;
+
+	const struct regulator_desc *buck_regs;
+	int num_buck_regs;
+
+	const struct regulator_desc *ldo_regs;
+	int num_ldo_regs;
+
+	const struct tps6594_regulator_irq_type **bucks_irq_types;
+	const struct tps6594_regulator_irq_type **ldos_irq_types;
+	int num_irq_types;
+
+	const struct tps6594_regulator_irq_type *ext_irq_types;
+	int num_ext_irqs;
+};
+
+static const struct tps6594_regulator_desc tps65224_reg_desc = {
+	.multi_phase_regs = tps65224_multi_regs,
+	.num_multi_phase_regs = ARRAY_SIZE(tps65224_multi_regs),
+	.buck_regs = tps65224_buck_regs,
+	.num_buck_regs = ARRAY_SIZE(tps65224_buck_regs),
+	.ldo_regs = tps65224_ldo_regs,
+	.num_ldo_regs = ARRAY_SIZE(tps65224_ldo_regs),
+	.bucks_irq_types = tps65224_bucks_irq_types,
+	.ldos_irq_types = tps65224_ldos_irq_types,
+	.num_irq_types = 1, /* OV or UV */
+	.ext_irq_types = tps65224_ext_regulator_irq_types,
+	.num_ext_irqs = ARRAY_SIZE(tps65224_ext_regulator_irq_types),
+};
+
+static const struct tps6594_regulator_desc tps6594_reg_desc = {
+	.multi_phase_regs = tps6594_multi_regs,
+	.num_multi_phase_regs = ARRAY_SIZE(tps6594_multi_regs),
+	.buck_regs = tps6594_buck_regs,
+	.num_buck_regs = ARRAY_SIZE(tps6594_buck_regs),
+	.ldo_regs = tps6594_ldo_regs,
+	.num_ldo_regs = ARRAY_SIZE(tps6594_ldo_regs),
+	.bucks_irq_types = tps6594_bucks_irq_types,
+	.ldos_irq_types = tps6594_ldos_irq_types,
+	.num_irq_types = 4, /* OV, UV, SC and ILIM */
+	.ext_irq_types = tps6594_ext_regulator_irq_types,
+	.num_ext_irqs = 2, /* only VCCA OV and UV */
+};
+
+static const struct tps6594_regulator_desc lp8764_reg_desc = {
+	.multi_phase_regs = tps6594_multi_regs,
+	.num_multi_phase_regs = ARRAY_SIZE(tps6594_multi_regs),
+	.buck_regs = tps6594_buck_regs,
+	.num_buck_regs = ARRAY_SIZE(tps6594_buck_regs),
+	.bucks_irq_types = tps6594_bucks_irq_types,
+	.num_irq_types = 4, /* OV, UV, SC and ILIM */
+	.ext_irq_types = tps6594_ext_regulator_irq_types,
+	.num_ext_irqs = ARRAY_SIZE(tps6594_ext_regulator_irq_types),
+};
+
 static int tps6594_regulator_probe(struct platform_device *pdev)
 {
 	struct tps6594 *tps = dev_get_drvdata(pdev->dev.parent);
@@ -410,24 +611,39 @@ static int tps6594_regulator_probe(struct platform_device *pdev)
 	struct regulator_config config = {};
 	struct tps6594_regulator_irq_data *irq_data;
 	struct tps6594_ext_regulator_irq_data *irq_ext_reg_data;
-	struct tps6594_regulator_irq_type *irq_type;
-	u8 buck_configured[BUCK_NB] = { 0 };
-	u8 buck_multi[MULTI_PHASE_NB] = { 0 };
-	static const char * const multiphases[] = {"buck12", "buck123", "buck1234", "buck34"};
+	const struct tps6594_regulator_irq_type *irq_type;
+	bool buck_configured[BUCK_NB] = { false };
+	bool buck_multi[MULTI_PHASE_NB] = { false };
+	const struct tps6594_regulator_desc *desc;
+	const struct regulator_desc *multi_regs;
+
 	static const char *npname;
-	int error, i, irq, multi, delta;
+	int error, i, irq, multi;
 	int irq_idx = 0;
 	int buck_idx = 0;
-	size_t ext_reg_irq_nb = 2;
 	size_t reg_irq_nb;
+
+	switch (tps->chip_id) {
+	case TPS65224:
+		desc = &tps65224_reg_desc;
+		break;
+	case TPS6594:
+	case TPS6593:
+		desc = &tps6594_reg_desc;
+		break;
+	case LP8764:
+		desc = &lp8764_reg_desc;
+		break;
+	default:
+		dev_err(tps->dev, "unknown chip_id %lu\n", tps->chip_id);
+		return -EINVAL;
+	};
+
 	enum {
 		MULTI_BUCK12,
+		MULTI_BUCK12_34,
 		MULTI_BUCK123,
 		MULTI_BUCK1234,
-		MULTI_BUCK12_34,
-		MULTI_FIRST = MULTI_BUCK12,
-		MULTI_LAST = MULTI_BUCK12_34,
-		MULTI_NUM = MULTI_LAST - MULTI_FIRST + 1
 	};
 
 	config.dev = tps->dev;
@@ -442,143 +658,148 @@ static int tps6594_regulator_probe(struct platform_device *pdev)
 	 * In case of Multiphase configuration, value should be defined for
 	 * buck_configured to avoid creating bucks for every buck in multiphase
 	 */
-	for (multi = MULTI_FIRST; multi < MULTI_NUM; multi++) {
-		np = of_find_node_by_name(tps->dev->of_node, multiphases[multi]);
-		npname = of_node_full_name(np);
-		np_pmic_parent = of_get_parent(of_get_parent(np));
-		if (of_node_cmp(of_node_full_name(np_pmic_parent), tps->dev->of_node->full_name))
+	for (multi = 0; multi < desc->num_multi_phase_regs; multi++) {
+		struct device_node *np_parent;
+
+		multi_regs = &desc->multi_phase_regs[multi];
+		np = of_find_node_by_name(tps->dev->of_node, multi_regs->supply_name);
+		if (!np)
 			continue;
-		delta = strcmp(npname, multiphases[multi]);
-		if (!delta) {
+
+		npname = of_node_full_name(np);
+		np_parent = of_get_parent(np);
+		np_pmic_parent = of_get_parent(np_parent);
+
+		if (np_pmic_parent &&
+		    !of_node_cmp(of_node_full_name(np_pmic_parent), tps->dev->of_node->full_name) &&
+		    strcmp(npname, multi_regs->supply_name) == 0) {
 			switch (multi) {
 			case MULTI_BUCK12:
-				buck_multi[0] = 1;
-				buck_configured[0] = 1;
-				buck_configured[1] = 1;
+				buck_multi[0] = true;
+				buck_configured[0] = true;
+				buck_configured[1] = true;
 				break;
 			/* multiphase buck34 is supported only with buck12 */
 			case MULTI_BUCK12_34:
-				buck_multi[0] = 1;
-				buck_multi[1] = 1;
-				buck_configured[0] = 1;
-				buck_configured[1] = 1;
-				buck_configured[2] = 1;
-				buck_configured[3] = 1;
+				buck_multi[0] = true;
+				buck_multi[1] = true;
+				buck_configured[0] = true;
+				buck_configured[1] = true;
+				buck_configured[2] = true;
+				buck_configured[3] = true;
 				break;
 			case MULTI_BUCK123:
-				buck_multi[2] = 1;
-				buck_configured[0] = 1;
-				buck_configured[1] = 1;
-				buck_configured[2] = 1;
+				buck_multi[2] = true;
+				buck_configured[0] = true;
+				buck_configured[1] = true;
+				buck_configured[2] = true;
 				break;
 			case MULTI_BUCK1234:
-				buck_multi[3] = 1;
-				buck_configured[0] = 1;
-				buck_configured[1] = 1;
-				buck_configured[2] = 1;
-				buck_configured[3] = 1;
+				buck_multi[3] = true;
+				buck_configured[0] = true;
+				buck_configured[1] = true;
+				buck_configured[2] = true;
+				buck_configured[3] = true;
 				break;
 			}
 		}
+
+		of_node_put(np_pmic_parent);
+		of_node_put(np_parent);
+		of_node_put(np);
 	}
 
-	if (tps->chip_id == LP8764) {
-		/* There is only 4 buck on LP8764 */
-		buck_configured[4] = 1;
-		reg_irq_nb = size_mul(REGS_INT_NB, (BUCK_NB - 1));
-	} else {
-		reg_irq_nb = size_mul(REGS_INT_NB, (size_add(BUCK_NB, LDO_NB)));
-	}
+	reg_irq_nb = desc->num_irq_types * (desc->num_buck_regs + desc->num_ldo_regs);
 
 	irq_data = devm_kmalloc_array(tps->dev, reg_irq_nb,
 				      sizeof(struct tps6594_regulator_irq_data), GFP_KERNEL);
 	if (!irq_data)
 		return -ENOMEM;
 
-	for (i = 0; i < MULTI_PHASE_NB; i++) {
-		if (buck_multi[i] == 0)
+	for (i = 0; i < desc->num_multi_phase_regs; i++) {
+		if (!buck_multi[i])
 			continue;
 
-		rdev = devm_regulator_register(&pdev->dev, &multi_regs[i], &config);
+		rdev = devm_regulator_register(&pdev->dev, &desc->multi_phase_regs[i],
+					       &config);
 		if (IS_ERR(rdev))
 			return dev_err_probe(tps->dev, PTR_ERR(rdev),
 					     "failed to register %s regulator\n",
 					     pdev->name);
 
 		/* config multiphase buck12+buck34 */
-		if (i == 1)
+		if (i == MULTI_BUCK12_34)
 			buck_idx = 2;
+
 		error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
-						 tps6594_bucks_irq_types[buck_idx], &irq_idx);
-		if (error)
-			return error;
-		error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
-						 tps6594_bucks_irq_types[buck_idx + 1], &irq_idx);
+						 desc->bucks_irq_types[buck_idx],
+						 desc->num_irq_types, &irq_idx);
 		if (error)
 			return error;
 
-		if (i == 2 || i == 3) {
+		error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
+						 desc->bucks_irq_types[buck_idx + 1],
+						 desc->num_irq_types, &irq_idx);
+		if (error)
+			return error;
+
+		if (i == MULTI_BUCK123 || i == MULTI_BUCK1234) {
 			error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
-							 tps6594_bucks_irq_types[buck_idx + 2],
+							 desc->bucks_irq_types[buck_idx + 2],
+							 desc->num_irq_types,
 							 &irq_idx);
 			if (error)
 				return error;
 		}
-		if (i == 3) {
+		if (i == MULTI_BUCK1234) {
 			error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
-							 tps6594_bucks_irq_types[buck_idx + 3],
+							 desc->bucks_irq_types[buck_idx + 3],
+							 desc->num_irq_types,
 							 &irq_idx);
 			if (error)
 				return error;
 		}
 	}
 
-	for (i = 0; i < BUCK_NB; i++) {
-		if (buck_configured[i] == 1)
+	for (i = 0; i < desc->num_buck_regs; i++) {
+		if (buck_configured[i])
 			continue;
 
-		rdev = devm_regulator_register(&pdev->dev, &buck_regs[i], &config);
+		rdev = devm_regulator_register(&pdev->dev, &desc->buck_regs[i], &config);
+		if (IS_ERR(rdev))
+			return dev_err_probe(tps->dev, PTR_ERR(rdev),
+					     "failed to register %s regulator\n", pdev->name);
+
+		error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
+						 desc->bucks_irq_types[i],
+						 desc->num_irq_types, &irq_idx);
+		if (error)
+			return error;
+	}
+
+	for (i = 0; i < desc->num_ldo_regs; i++) {
+		rdev = devm_regulator_register(&pdev->dev, &desc->ldo_regs[i], &config);
 		if (IS_ERR(rdev))
 			return dev_err_probe(tps->dev, PTR_ERR(rdev),
 					     "failed to register %s regulator\n",
 					     pdev->name);
 
 		error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
-						 tps6594_bucks_irq_types[i], &irq_idx);
+						 desc->ldos_irq_types[i],
+						 desc->num_irq_types, &irq_idx);
 		if (error)
 			return error;
 	}
 
-	/* LP8764 dosen't have LDO */
-	if (tps->chip_id != LP8764) {
-		for (i = 0; i < ARRAY_SIZE(ldo_regs); i++) {
-			rdev = devm_regulator_register(&pdev->dev, &ldo_regs[i], &config);
-			if (IS_ERR(rdev))
-				return dev_err_probe(tps->dev, PTR_ERR(rdev),
-						     "failed to register %s regulator\n",
-						     pdev->name);
-
-			error = tps6594_request_reg_irqs(pdev, rdev, irq_data,
-							 tps6594_ldos_irq_types[i],
-							 &irq_idx);
-			if (error)
-				return error;
-		}
-	}
-
-	if (tps->chip_id == LP8764)
-		ext_reg_irq_nb = ARRAY_SIZE(tps6594_ext_regulator_irq_types);
-
 	irq_ext_reg_data = devm_kmalloc_array(tps->dev,
-					ext_reg_irq_nb,
-					sizeof(struct tps6594_ext_regulator_irq_data),
-					GFP_KERNEL);
+					      desc->num_ext_irqs,
+					      sizeof(struct tps6594_ext_regulator_irq_data),
+					      GFP_KERNEL);
 	if (!irq_ext_reg_data)
 		return -ENOMEM;
 
-	for (i = 0; i < ext_reg_irq_nb; ++i) {
-		irq_type = &tps6594_ext_regulator_irq_types[i];
-
+	for (i = 0; i < desc->num_ext_irqs; ++i) {
+		irq_type = &desc->ext_irq_types[i];
 		irq = platform_get_irq_byname(pdev, irq_type->irq_name);
 		if (irq < 0)
 			return -EINVAL;
@@ -596,6 +817,7 @@ static int tps6594_regulator_probe(struct platform_device *pdev)
 					     "failed to request %s IRQ %d\n",
 					     irq_type->irq_name, irq);
 	}
+
 	return 0;
 }
 
@@ -610,5 +832,6 @@ module_platform_driver(tps6594_regulator_driver);
 
 MODULE_ALIAS("platform:tps6594-regulator");
 MODULE_AUTHOR("Jerome Neanne <jneanne@baylibre.com>");
+MODULE_AUTHOR("Nirmala Devi Mal Nadar <m.nirmaladevi@ltts.com>");
 MODULE_DESCRIPTION("TPS6594 voltage regulator driver");
 MODULE_LICENSE("GPL");
