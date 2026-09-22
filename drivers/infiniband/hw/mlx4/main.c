@@ -3319,9 +3319,17 @@ static int __init mlx4_ib_init(void)
 	if (!wq)
 		return -ENOMEM;
 
-	err = mlx4_ib_mcg_init();
+	err = mlx4_ib_qp_event_init();
+	if (err)
+		goto clean_qp_event;
+
+	err = mlx4_ib_cm_init();
 	if (err)
 		goto clean_wq;
+
+	err = mlx4_ib_mcg_init();
+	if (err)
+		goto clean_cm;
 
 	err = mlx4_register_interface(&mlx4_ib_interface);
 	if (err)
@@ -3332,7 +3340,13 @@ static int __init mlx4_ib_init(void)
 clean_mcg:
 	mlx4_ib_mcg_destroy();
 
+clean_cm:
+	mlx4_ib_cm_destroy();
+
 clean_wq:
+	mlx4_ib_qp_event_cleanup();
+
+clean_qp_event:
 	destroy_workqueue(wq);
 	return err;
 }
@@ -3341,6 +3355,8 @@ static void __exit mlx4_ib_cleanup(void)
 {
 	mlx4_unregister_interface(&mlx4_ib_interface);
 	mlx4_ib_mcg_destroy();
+	mlx4_ib_cm_destroy();
+	mlx4_ib_qp_event_cleanup();
 	destroy_workqueue(wq);
 }
 

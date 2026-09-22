@@ -139,6 +139,35 @@
 #define TRCIDR0_QSUPP_MASK			GENMASK(16, 15)
 #define TRCIDR0_TSSIZE_MASK			GENMASK(28, 24)
 
+#define TRCIDR2_CIDSIZE_MASK			GENMASK(9, 5)
+#define TRCIDR2_VMIDSIZE_MASK			GENMASK(14, 10)
+#define TRCIDR2_CCSIZE_MASK			GENMASK(28, 25)
+
+#define TRCIDR3_CCITMIN_MASK			GENMASK(11, 0)
+#define TRCIDR3_EXLEVEL_S_MASK			GENMASK(19, 16)
+#define TRCIDR3_EXLEVEL_NS_MASK			GENMASK(23, 20)
+#define TRCIDR3_TRCERR				BIT(24)
+#define TRCIDR3_SYNCPR				BIT(25)
+#define TRCIDR3_STALLCTL			BIT(26)
+#define TRCIDR3_SYSSTALL			BIT(27)
+#define TRCIDR3_NUMPROC_LO_MASK			GENMASK(30, 28)
+#define TRCIDR3_NUMPROC_HI_MASK			GENMASK(13, 12)
+#define TRCIDR3_NOOVERFLOW			BIT(31)
+
+#define TRCIDR4_NUMACPAIRS_MASK			GENMASK(3, 0)
+#define TRCIDR4_NUMPC_MASK			GENMASK(15, 12)
+#define TRCIDR4_NUMRSPAIR_MASK			GENMASK(19, 16)
+#define TRCIDR4_NUMSSCC_MASK			GENMASK(23, 20)
+#define TRCIDR4_NUMCIDC_MASK			GENMASK(27, 24)
+#define TRCIDR4_NUMVMIDC_MASK			GENMASK(31, 28)
+
+#define TRCIDR5_NUMEXTIN_MASK			GENMASK(8, 0)
+#define TRCIDR5_TRACEIDSIZE_MASK		GENMASK(21, 16)
+#define TRCIDR5_ATBTRIG				BIT(22)
+#define TRCIDR5_LPOVERRIDE			BIT(23)
+#define TRCIDR5_NUMSEQSTATE_MASK		GENMASK(27, 25)
+#define TRCIDR5_NUMCNTR_MASK			GENMASK(30, 28)
+
 /*
  * System instructions to access ETM registers.
  * See ETMv4.4 spec ARM IHI0064F section 4.3.6 System instructions
@@ -484,6 +513,7 @@
 #define ETM_MAX_NR_PE			8
 #define ETMv4_MAX_CNTR			4
 #define ETM_MAX_SEQ_STATES		4
+#define ETM_MAX_SEQ_TRANSITIONS		3
 #define ETM_MAX_EXT_INP_SEL		4
 #define ETM_MAX_EXT_INP			256
 #define ETM_MAX_EXT_OUT			4
@@ -751,7 +781,6 @@ struct etmv4_config {
 	u32				eventctrl1;
 	u32				stall_ctrl;
 	u32				ts_ctrl;
-	u32				syncfreq;
 	u32				ccctlr;
 	u32				bb_ctrl;
 	u32				vinst_ctrl;
@@ -759,7 +788,8 @@ struct etmv4_config {
 	u32				vissctlr;
 	u32				vipcssctlr;
 	u8				seq_idx;
-	u32				seq_ctrl[ETM_MAX_SEQ_STATES];
+	u8				syncfreq;
+	u32				seq_ctrl[ETM_MAX_SEQ_TRANSITIONS];
 	u32				seq_rst;
 	u32				seq_state;
 	u8				cntr_idx;
@@ -811,7 +841,7 @@ struct etmv4_save_state {
 	u32	trcvissctlr;
 	u32	trcvipcssctlr;
 
-	u32	trcseqevr[ETM_MAX_SEQ_STATES];
+	u32	trcseqevr[ETM_MAX_SEQ_TRANSITIONS];
 	u32	trcseqrstevr;
 	u32	trcseqstr;
 	u32	trcextinselr;
@@ -862,6 +892,7 @@ struct etmv4_save_state {
  * @numcidc:	Number of contextID comparators.
  * @numvmidc:	Number of VMID comparators.
  * @nrseqstate: The number of sequencer states that are implemented.
+ * @nr_seq_ctrls: The number of sequence state transition control registers.
  * @nr_event:	Indicates how many events the trace unit support.
  * @nr_resource:The number of resource selection pairs available for tracing.
  * @nr_ss_cmp:	Number of single-shot comparator controls that are available.
@@ -926,6 +957,7 @@ struct etmv4_drvdata {
 	u8				numcidc;
 	u8				numvmidc;
 	u8				nrseqstate;
+	u8				nr_seq_ctrls;
 	u8				nr_event;
 	u8				nr_resource;
 	u8				nr_ss_cmp;

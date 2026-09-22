@@ -795,7 +795,7 @@ err_power_exit:
 	return ret;
 }
 
-static int ipa_remove(struct platform_device *pdev)
+static void ipa_remove(struct platform_device *pdev)
 {
 	struct ipa *ipa = dev_get_drvdata(&pdev->dev);
 	struct ipa_power *power = ipa->power;
@@ -818,8 +818,16 @@ static int ipa_remove(struct platform_device *pdev)
 			usleep_range(USEC_PER_MSEC, 2 * USEC_PER_MSEC);
 			ret = ipa_modem_stop(ipa);
 		}
-		if (ret)
-			return ret;
+		if (ret) {
+			/*
+			 * Continuing teardown after failing to stop the modem
+			 * could crash, so leave the remaining resources allocated.
+			 */
+			dev_err(dev, "Failed to stop modem (%pe), leaking resources\n",
+				ERR_PTR(ret));
+			pm_runtime_put_noidle(dev);
+			return;
+		}
 
 		ipa_teardown(ipa);
 	}
@@ -836,16 +844,7 @@ out_power_put:
 	kfree(ipa);
 	ipa_power_exit(power);
 
-	return 0;
-}
-
-static void ipa_shutdown(struct platform_device *pdev)
-{
-	int ret;
-
-	ret = ipa_remove(pdev);
-	if (ret)
-		dev_err(&pdev->dev, "shutdown: remove returned %d\n", ret);
+	dev_info(dev, "IPA driver removed");
 }
 
 static const struct attribute_group *ipa_attribute_groups[] = {
@@ -857,8 +856,8 @@ static const struct attribute_group *ipa_attribute_groups[] = {
 
 static struct platform_driver ipa_driver = {
 	.probe		= ipa_probe,
-	.remove		= ipa_remove,
-	.shutdown	= ipa_shutdown,
+	.remove_new	= ipa_remove,
+	.shutdown	= ipa_remove,
 	.driver	= {
 		.name		= "ipa",
 		.pm		= &ipa_pm_ops,
