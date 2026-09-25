@@ -157,6 +157,7 @@ void __init imx_src_init(void)
 	}
 
 	src_base = of_iomap(np, 0);
+	of_node_put(np);
 	WARN_ON(!src_base);
 
 	if (cpu_is_imx7d()) {

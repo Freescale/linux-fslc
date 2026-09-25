@@ -20,23 +20,8 @@
 #include <asm/time.h>
 #include <asm/param.h>
 
-typedef u64 __nocast cputime_t;
-typedef u64 __nocast cputime64_t;
-
-#define cmpxchg_cputime(ptr, old, new) cmpxchg(ptr, old, new)
-
 #ifdef __KERNEL__
-/*
- * Convert cputime <-> microseconds
- */
-extern u64 __cputime_usec_factor;
-
-static inline unsigned long cputime_to_usecs(const cputime_t ct)
-{
-	return mulhdu((__force u64) ct, __cputime_usec_factor);
-}
-
-#define cputime_to_nsecs(cputime) tb_to_ns((__force u64)cputime)
+#define cputime_to_nsecs(cputime) tb_to_ns(cputime)
 
 /*
  * PPC64 uses PACA which is task independent for storing accounting data while
@@ -46,23 +31,10 @@ static inline unsigned long cputime_to_usecs(const cputime_t ct)
 #ifdef CONFIG_PPC64
 #define get_accounting(tsk)	(&get_paca()->accounting)
 #define raw_get_accounting(tsk)	(&local_paca->accounting)
-static inline void arch_vtime_task_switch(struct task_struct *tsk) { }
 
 #else
 #define get_accounting(tsk)	(&task_thread_info(tsk)->accounting)
 #define raw_get_accounting(tsk)	get_accounting(tsk)
-/*
- * Called from the context switch with interrupts disabled, to charge all
- * accumulated times to the current process, and to prepare accounting on
- * the next process.
- */
-static inline void arch_vtime_task_switch(struct task_struct *prev)
-{
-	struct cpu_accounting_data *acct = get_accounting(current);
-	struct cpu_accounting_data *acct0 = get_accounting(prev);
-
-	acct->starttime = acct0->starttime;
-}
 #endif
 
 /*

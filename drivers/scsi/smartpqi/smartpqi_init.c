@@ -54,7 +54,24 @@ MODULE_DESCRIPTION("Driver for Microchip Smart Family Controller version "
 MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
-static void pqi_take_ctrl_offline(struct pqi_ctrl_info *ctrl_info);
+struct pqi_cmd_priv {
+	int this_residual;
+};
+
+static struct pqi_cmd_priv *pqi_cmd_priv(struct scsi_cmnd *cmd)
+{
+	return scsi_cmd_priv(cmd);
+}
+
+static int pqi_init_cmd_priv(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
+{
+	memset(pqi_cmd_priv(cmd), 0, sizeof(struct pqi_cmd_priv));
+	return 0;
+}
+
+static void pqi_verify_structures(void);
+static void pqi_take_ctrl_offline(struct pqi_ctrl_info *ctrl_info,
+	enum pqi_ctrl_shutdown_reason ctrl_shutdown_reason);
 static void pqi_ctrl_offline_worker(struct work_struct *work);
 static int pqi_scan_scsi_devices(struct pqi_ctrl_info *ctrl_info);
 static void pqi_scan_start(struct Scsi_Host *shost);
@@ -226,7 +243,7 @@ static inline void pqi_check_ctrl_health(struct pqi_ctrl_info *ctrl_info)
 {
 	if (ctrl_info->controller_online)
 		if (!sis_is_firmware_running(ctrl_info))
-			pqi_take_ctrl_offline(ctrl_info);
+			pqi_take_ctrl_offline(ctrl_info, PQI_FIRMWARE_KERNEL_NOT_UP);
 }
 
 static inline bool pqi_is_hba_lunid(u8 *scsi3addr)
@@ -3163,9 +3180,10 @@ static int pqi_interpret_task_management_response(struct pqi_ctrl_info *ctrl_inf
 	return rc;
 }
 
-static inline void pqi_invalid_response(struct pqi_ctrl_info *ctrl_info)
+static inline void pqi_invalid_response(struct pqi_ctrl_info *ctrl_info,
+	enum pqi_ctrl_shutdown_reason ctrl_shutdown_reason)
 {
-	pqi_take_ctrl_offline(ctrl_info);
+	pqi_take_ctrl_offline(ctrl_info, ctrl_shutdown_reason);
 }
 
 static int pqi_process_io_intr(struct pqi_ctrl_info *ctrl_info, struct pqi_queue_group *queue_group)
@@ -3183,7 +3201,7 @@ static int pqi_process_io_intr(struct pqi_ctrl_info *ctrl_info, struct pqi_queue
 	while (1) {
 		oq_pi = readl(queue_group->oq_pi);
 		if (oq_pi >= ctrl_info->num_elements_per_oq) {
-			pqi_invalid_response(ctrl_info);
+			pqi_invalid_response(ctrl_info, PQI_IO_PI_OUT_OF_RANGE);
 			dev_err(&ctrl_info->pci_dev->dev,
 				"I/O interrupt: producer index (%u) out of range (0-%u): consumer index: %u\n",
 				oq_pi, ctrl_info->num_elements_per_oq - 1, oq_ci);
@@ -3198,7 +3216,7 @@ static int pqi_process_io_intr(struct pqi_ctrl_info *ctrl_info, struct pqi_queue
 
 		request_id = get_unaligned_le16(&response->request_id);
 		if (request_id >= ctrl_info->max_io_slots) {
-			pqi_invalid_response(ctrl_info);
+			pqi_invalid_response(ctrl_info, PQI_INVALID_REQ_ID);
 			dev_err(&ctrl_info->pci_dev->dev,
 				"request ID in response (%u) out of range (0-%u): producer index: %u  consumer index: %u\n",
 				request_id, ctrl_info->max_io_slots - 1, oq_pi, oq_ci);
@@ -3207,7 +3225,7 @@ static int pqi_process_io_intr(struct pqi_ctrl_info *ctrl_info, struct pqi_queue
 
 		io_request = &ctrl_info->io_request_pool[request_id];
 		if (atomic_read(&io_request->refcount) == 0) {
-			pqi_invalid_response(ctrl_info);
+			pqi_invalid_response(ctrl_info, PQI_UNMATCHED_REQ_ID);
 			dev_err(&ctrl_info->pci_dev->dev,
 				"request ID in response (%u) does not match an outstanding I/O request: producer index: %u  consumer index: %u\n",
 				request_id, oq_pi, oq_ci);
@@ -3243,7 +3261,7 @@ static int pqi_process_io_intr(struct pqi_ctrl_info *ctrl_info, struct pqi_queue
 			pqi_process_io_error(response->header.iu_type, io_request);
 			break;
 		default:
-			pqi_invalid_response(ctrl_info);
+			pqi_invalid_response(ctrl_info, PQI_UNEXPECTED_IU_TYPE);
 			dev_err(&ctrl_info->pci_dev->dev,
 				"unexpected IU type: 0x%x: producer index: %u  consumer index: %u\n",
 				response->header.iu_type, oq_pi, oq_ci);
@@ -3425,7 +3443,7 @@ static void pqi_process_soft_reset(struct pqi_ctrl_info *ctrl_info)
 		pqi_ofa_free_host_buffer(ctrl_info);
 		pqi_ctrl_ofa_done(ctrl_info);
 		pqi_ofa_ctrl_unquiesce(ctrl_info);
-		pqi_take_ctrl_offline(ctrl_info);
+		pqi_take_ctrl_offline(ctrl_info, PQI_OFA_RESPONSE_TIMEOUT);
 		break;
 	}
 }
@@ -3550,7 +3568,7 @@ static void pqi_heartbeat_timer_handler(struct timer_list *t)
 			dev_err(&ctrl_info->pci_dev->dev,
 				"no heartbeat detected - last heartbeat count: %u\n",
 				heartbeat_count);
-			pqi_take_ctrl_offline(ctrl_info);
+			pqi_take_ctrl_offline(ctrl_info, PQI_NO_HEARTBEAT);
 			return;
 		}
 	} else {
@@ -3614,7 +3632,7 @@ static int pqi_process_event_intr(struct pqi_ctrl_info *ctrl_info)
 	while (1) {
 		oq_pi = readl(event_queue->oq_pi);
 		if (oq_pi >= PQI_NUM_EVENT_QUEUE_ELEMENTS) {
-			pqi_invalid_response(ctrl_info);
+			pqi_invalid_response(ctrl_info, PQI_EVENT_PI_OUT_OF_RANGE);
 			dev_err(&ctrl_info->pci_dev->dev,
 				"event interrupt: producer index (%u) out of range (0-%u): consumer index: %u\n",
 				oq_pi, PQI_NUM_EVENT_QUEUE_ELEMENTS - 1, oq_ci);
@@ -5387,7 +5405,7 @@ static void pqi_aio_io_complete(struct pqi_io_request *io_request,
 	scsi_dma_unmap(scmd);
 	if (io_request->status == -EAGAIN || pqi_raid_bypass_retry_needed(io_request)) {
 		set_host_byte(scmd, DID_IMM_RETRY);
-		scmd->SCp.this_residual++;
+		pqi_cmd_priv(scmd)->this_residual++;
 	}
 
 	pqi_free_io_request(io_request);
@@ -5611,7 +5629,7 @@ static inline bool pqi_is_bypass_eligible_request(struct scsi_cmnd *scmd)
 	if (blk_rq_is_passthrough(scsi_cmd_to_rq(scmd)))
 		return false;
 
-	return scmd->SCp.this_residual == 0;
+	return pqi_cmd_priv(scmd)->this_residual == 0;
 }
 
 /*
@@ -5622,6 +5640,17 @@ static inline bool pqi_is_bypass_eligible_request(struct scsi_cmnd *scmd)
 void pqi_prep_for_scsi_done(struct scsi_cmnd *scmd)
 {
 	struct pqi_scsi_dev *device;
+
+	/*
+	 * Clear the AIO-retry marker on final completion so the tag
+	 * starts clean on its next dispatch.  On DID_IMM_RETRY leave
+	 * it intact: pqi_aio_io_complete() sets DID_IMM_RETRY and
+	 * bumps the marker to steer the requeue onto the RAID path,
+	 * and pqi_process_raid_io_error() consumes the non-zero
+	 * marker to offline a misbehaving drive.
+	 */
+	if (host_byte(scmd->result) != DID_IMM_RETRY)
+		pqi_cmd_priv(scmd)->this_residual = 0;
 
 	if (!scmd->device) {
 		set_host_byte(scmd, DID_NO_CONNECT);
@@ -6662,19 +6691,21 @@ static DEVICE_ATTR(enable_r5_writes, 0644,
 static DEVICE_ATTR(enable_r6_writes, 0644,
 	pqi_host_enable_r6_writes_show, pqi_host_enable_r6_writes_store);
 
-static struct device_attribute *pqi_shost_attrs[] = {
-	&dev_attr_driver_version,
-	&dev_attr_firmware_version,
-	&dev_attr_model,
-	&dev_attr_serial_number,
-	&dev_attr_vendor,
-	&dev_attr_rescan,
-	&dev_attr_lockup_action,
-	&dev_attr_enable_stream_detection,
-	&dev_attr_enable_r5_writes,
-	&dev_attr_enable_r6_writes,
+static struct attribute *pqi_shost_attrs[] = {
+	&dev_attr_driver_version.attr,
+	&dev_attr_firmware_version.attr,
+	&dev_attr_model.attr,
+	&dev_attr_serial_number.attr,
+	&dev_attr_vendor.attr,
+	&dev_attr_rescan.attr,
+	&dev_attr_lockup_action.attr,
+	&dev_attr_enable_stream_detection.attr,
+	&dev_attr_enable_r5_writes.attr,
+	&dev_attr_enable_r6_writes.attr,
 	NULL
 };
+
+ATTRIBUTE_GROUPS(pqi_shost);
 
 static ssize_t pqi_unique_id_show(struct device *dev,
 	struct device_attribute *attr, char *buffer)
@@ -6946,16 +6977,18 @@ static DEVICE_ATTR(ssd_smart_path_enabled, 0444, pqi_ssd_smart_path_enabled_show
 static DEVICE_ATTR(raid_level, 0444, pqi_raid_level_show, NULL);
 static DEVICE_ATTR(raid_bypass_cnt, 0444, pqi_raid_bypass_cnt_show, NULL);
 
-static struct device_attribute *pqi_sdev_attrs[] = {
-	&dev_attr_lunid,
-	&dev_attr_unique_id,
-	&dev_attr_path_info,
-	&dev_attr_sas_address,
-	&dev_attr_ssd_smart_path_enabled,
-	&dev_attr_raid_level,
-	&dev_attr_raid_bypass_cnt,
+static struct attribute *pqi_sdev_attrs[] = {
+	&dev_attr_lunid.attr,
+	&dev_attr_unique_id.attr,
+	&dev_attr_path_info.attr,
+	&dev_attr_sas_address.attr,
+	&dev_attr_ssd_smart_path_enabled.attr,
+	&dev_attr_raid_level.attr,
+	&dev_attr_raid_bypass_cnt.attr,
 	NULL
 };
+
+ATTRIBUTE_GROUPS(pqi_sdev);
 
 static struct scsi_host_template pqi_driver_template = {
 	.module = THIS_MODULE,
@@ -6971,8 +7004,10 @@ static struct scsi_host_template pqi_driver_template = {
 	.slave_configure = pqi_slave_configure,
 	.slave_destroy = pqi_slave_destroy,
 	.map_queues = pqi_map_queues,
-	.sdev_attrs = pqi_sdev_attrs,
-	.shost_attrs = pqi_shost_attrs,
+	.sdev_groups = pqi_sdev_groups,
+	.shost_groups = pqi_shost_groups,
+	.cmd_size = sizeof(struct pqi_cmd_priv),
+	.init_cmd_priv = pqi_init_cmd_priv,
 };
 
 static int pqi_register_scsi(struct pqi_ctrl_info *ctrl_info)
@@ -7332,7 +7367,10 @@ static void pqi_ctrl_update_feature_flags(struct pqi_ctrl_info *ctrl_info,
 		ctrl_info->unique_wwid_in_report_phys_lun_supported =
 			firmware_feature->enabled;
 		break;
+	case PQI_FIRMWARE_FEATURE_FW_TRIAGE:
+		ctrl_info->firmware_triage_supported = firmware_feature->enabled;
 		pqi_save_fw_triage_setting(ctrl_info, firmware_feature->enabled);
+		break;
 	}
 
 	pqi_firmware_feature_status(ctrl_info, firmware_feature);
@@ -7426,6 +7464,11 @@ static struct pqi_firmware_feature pqi_firmware_features[] = {
 	{
 		.feature_name = "Unique WWID in Report Physical LUN",
 		.feature_bit = PQI_FIRMWARE_FEATURE_UNIQUE_WWID_IN_REPORT_PHYS_LUN,
+		.feature_status = pqi_ctrl_update_feature_flags,
+	},
+	{
+		.feature_name = "Firmware Triage",
+		.feature_bit = PQI_FIRMWARE_FEATURE_FW_TRIAGE,
 		.feature_status = pqi_ctrl_update_feature_flags,
 	},
 };
@@ -7528,6 +7571,7 @@ static void pqi_ctrl_reset_config(struct pqi_ctrl_info *ctrl_info)
 	ctrl_info->raid_iu_timeout_supported = false;
 	ctrl_info->tmf_iu_timeout_supported = false;
 	ctrl_info->unique_wwid_in_report_phys_lun_supported = false;
+	ctrl_info->firmware_triage_supported = false;
 }
 
 static int pqi_process_config_table(struct pqi_ctrl_info *ctrl_info)
@@ -8474,7 +8518,8 @@ static void pqi_ctrl_offline_worker(struct work_struct *work)
 	pqi_take_ctrl_offline_deferred(ctrl_info);
 }
 
-static void pqi_take_ctrl_offline(struct pqi_ctrl_info *ctrl_info)
+static void pqi_take_ctrl_offline(struct pqi_ctrl_info *ctrl_info,
+	enum pqi_ctrl_shutdown_reason ctrl_shutdown_reason)
 {
 	if (!ctrl_info->controller_online)
 		return;
@@ -8483,7 +8528,7 @@ static void pqi_take_ctrl_offline(struct pqi_ctrl_info *ctrl_info)
 	ctrl_info->pqi_mode_enabled = false;
 	pqi_ctrl_block_requests(ctrl_info);
 	if (!pqi_disable_ctrl_shutdown)
-		sis_shutdown_ctrl(ctrl_info);
+		sis_shutdown_ctrl(ctrl_info, ctrl_shutdown_reason);
 	pci_disable_device(ctrl_info->pci_dev);
 	dev_err(&ctrl_info->pci_dev->dev, "controller offline\n");
 	schedule_work(&ctrl_info->ctrl_offline_work);
@@ -9279,6 +9324,8 @@ static int __init pqi_init(void)
 	int rc;
 
 	pr_info(DRIVER_NAME "\n");
+	pqi_verify_structures();
+	sis_verify_structures();
 
 	pqi_sas_transport_template = sas_attach_transport(&pqi_sas_transport_functions);
 	if (!pqi_sas_transport_template)
@@ -9302,7 +9349,7 @@ static void __exit pqi_cleanup(void)
 module_init(pqi_init);
 module_exit(pqi_cleanup);
 
-static void __attribute__((unused)) verify_structures(void)
+static void pqi_verify_structures(void)
 {
 	BUILD_BUG_ON(offsetof(struct pqi_ctrl_registers,
 		sis_host_to_ctrl_doorbell) != 0x20);
@@ -9318,6 +9365,8 @@ static void __attribute__((unused)) verify_structures(void)
 		sis_product_identifier) != 0xb4);
 	BUILD_BUG_ON(offsetof(struct pqi_ctrl_registers,
 		sis_firmware_status) != 0xbc);
+	BUILD_BUG_ON(offsetof(struct pqi_ctrl_registers,
+		sis_ctrl_shutdown_reason_code) != 0xcc);
 	BUILD_BUG_ON(offsetof(struct pqi_ctrl_registers,
 		sis_mailbox) != 0x1000);
 	BUILD_BUG_ON(offsetof(struct pqi_ctrl_registers,
