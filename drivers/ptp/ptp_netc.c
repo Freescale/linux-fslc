@@ -789,6 +789,7 @@ static void netc_timer_init(struct netc_timer *priv)
 		   TMR_CTRL_TE | TMR_CTRL_FS;
 	netc_timer_wr(priv, NETC_TMR_CTRL, tmr_ctrl);
 	netc_timer_wr(priv, NETC_TMR_PRSC, priv->oclk_prsc);
+	netc_timer_wr(priv, NETC_TMR_TEMASK, 0);
 
 	/* Disable FIPER by default */
 	fiper_ctrl = netc_timer_rd(priv, NETC_TMR_FIPER_CTRL);
@@ -926,6 +927,11 @@ static irqreturn_t netc_timer_isr(int irq, void *data)
 	/* Clear interrupts status */
 	netc_timer_wr(priv, NETC_TMR_TEVENT, tmr_event);
 
+	if (!tmr_event) {
+		spin_unlock(&priv->lock);
+		return IRQ_NONE;
+	}
+
 	if (tmr_event & TMR_TEVENT_ALMEN(0))
 		netc_timer_alarm_write(priv, NETC_TMR_DEFAULT_ALARM, 0);
 
@@ -961,7 +967,8 @@ static int netc_timer_init_msix_irq(struct netc_timer *priv)
 	}
 
 	priv->irq = pci_irq_vector(pdev, 0);
-	err = request_irq(priv->irq, netc_timer_isr, 0, priv->irq_name, priv);
+	err = request_irq(priv->irq, netc_timer_isr, IRQF_NO_AUTOEN,
+			  priv->irq_name, priv);
 	if (err) {
 		dev_err(&pdev->dev, "request_irq() failed\n");
 		pci_free_irq_vectors(pdev);
@@ -976,7 +983,6 @@ static void netc_timer_free_msix_irq(struct netc_timer *priv)
 {
 	struct pci_dev *pdev = priv->pdev;
 
-	disable_irq(priv->irq);
 	free_irq(priv->irq, priv);
 	pci_free_irq_vectors(pdev);
 }
@@ -1030,6 +1036,8 @@ static int netc_timer_probe(struct pci_dev *pdev,
 		goto free_msix_irq;
 	}
 
+	enable_irq(priv->irq);
+
 	return 0;
 
 free_msix_irq:
@@ -1044,9 +1052,10 @@ static void netc_timer_remove(struct pci_dev *pdev)
 {
 	struct netc_timer *priv = pci_get_drvdata(pdev);
 
+	disable_irq(priv->irq);
+	ptp_clock_unregister(priv->clock);
 	netc_timer_wr(priv, NETC_TMR_TEMASK, 0);
 	netc_timer_wr(priv, NETC_TMR_CTRL, 0);
-	ptp_clock_unregister(priv->clock);
 	netc_timer_free_msix_irq(priv);
 	netc_timer_pci_remove(pdev);
 }
