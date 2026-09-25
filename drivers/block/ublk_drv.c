@@ -1099,8 +1099,14 @@ static inline void __ublk_complete_rq(struct request *req)
 	 *
 	 * Re-read simply for this unlikely case.
 	 */
-	if (unlikely(unmapped_bytes < io->res))
+	if (unlikely(unmapped_bytes < io->res)) {
+		if (unlikely(!unmapped_bytes)) {
+			res = BLK_STS_IOERR;
+			goto exit;
+		}
+
 		io->res = unmapped_bytes;
+	}
 
 	/*
 	 * Run bio->bi_end_io() with softirqs disabled. If the final fput
@@ -1436,6 +1442,12 @@ static int ublk_ch_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	if (vma->vm_flags & VM_WRITE)
 		return -EPERM;
+
+	/*
+	 * The per-queue command buffer is kernel-written ABI; prevent
+	 * the daemon from upgrading to writable via mprotect().
+	 */
+	vm_flags_clear(vma, VM_MAYWRITE);
 
 	end = UBLKSRV_CMD_BUF_OFFSET + ub->dev_info.nr_hw_queues * max_sz;
 	if (phys_off < UBLKSRV_CMD_BUF_OFFSET || phys_off >= end)
@@ -2436,6 +2448,15 @@ static int ublk_ctrl_add_dev(struct io_uring_cmd *cmd)
 
 	/* update device id */
 	ub->dev_info.dev_id = ub->ub_number;
+
+	/*
+	 * ->state and ->ublksrv_pid are owned by the driver and only read back
+	 * by userspace, but they come from the copied-in dev_info, so reset
+	 * them. Otherwise a device added with ->state != DEAD looks live while
+	 * ->ub_disk is still NULL.
+	 */
+	ub->dev_info.state = UBLK_S_DEV_DEAD;
+	ub->dev_info.ublksrv_pid = -1;
 
 	/*
 	 * 64bit flags will be copied back to userspace as feature

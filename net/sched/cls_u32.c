@@ -950,6 +950,8 @@ static int u32_change(struct net *net, struct sk_buff *in_skb,
 		if (!tc_in_hw(new->flags))
 			new->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
 
+		tcf_proto_update_usesw(tp, new->flags);
+
 		u32_replace_knode(tp, tp_c, new);
 		tcf_unbind_filter(tp, &n->res);
 		tcf_exts_get_net(&n->exts);
@@ -1163,6 +1165,8 @@ static int u32_change(struct net *net, struct sk_buff *in_skb,
 		if (!tc_in_hw(n->flags))
 			n->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
 
+		tcf_proto_update_usesw(tp, n->flags);
+
 		ins = &ht->ht[TC_U32_HASH(handle)];
 		for (pins = rtnl_dereference(*ins); pins;
 		     ins = &pins->next, pins = rtnl_dereference(*ins))
@@ -1331,6 +1335,9 @@ static void u32_bind_class(void *fh, u32 classid, unsigned long cl, void *q,
 			   unsigned long base)
 {
 	struct tc_u_knode *n = fh;
+
+	if (TC_U32_KEY(n->handle) == 0)
+		return;
 
 	tc_cls_bind_class(classid, cl, q, &n->res, base);
 }

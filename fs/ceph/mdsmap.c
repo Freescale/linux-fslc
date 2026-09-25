@@ -3,6 +3,7 @@
 
 #include <linux/bug.h>
 #include <linux/err.h>
+#include <linux/overflow.h>
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -11,10 +12,11 @@
 #include <linux/ceph/messenger.h>
 #include <linux/ceph/decode.h>
 
+#include "mds_client.h"
 #include "super.h"
 
 #define CEPH_MDS_IS_READY(i, ignore_laggy) \
-	(m->m_info[i].state > 0 && ignore_laggy ? true : !m->m_info[i].laggy)
+	(m->m_info[i].state > 0 && (ignore_laggy ? true : !m->m_info[i].laggy))
 
 static int __mdsmap_get_random_mds(struct ceph_mdsmap *m, bool ignore_laggy)
 {
@@ -117,6 +119,7 @@ bad:
 struct ceph_mdsmap *ceph_mdsmap_decode(struct ceph_mds_client *mdsc, void **p,
 				       void *end, bool msgr2)
 {
+	struct ceph_client *cl = mdsc->fsc->client;
 	struct ceph_mdsmap *m;
 	const void *start = *p;
 	int i, j, n;
@@ -124,6 +127,7 @@ struct ceph_mdsmap *ceph_mdsmap_decode(struct ceph_mds_client *mdsc, void **p,
 	u8 mdsmap_v;
 	u16 mdsmap_ev;
 	u32 target;
+	size_t export_targets_len;
 
 	m = kzalloc(sizeof(*m), GFP_NOFS);
 	if (!m)
@@ -222,8 +226,11 @@ struct ceph_mdsmap *ceph_mdsmap_decode(struct ceph_mds_client *mdsc, void **p,
 		*p += namelen;
 		if (info_v >= 2) {
 			ceph_decode_32_safe(p, end, num_export_targets, bad);
+			export_targets_len = size_mul(num_export_targets,
+						      sizeof(u32));
+			ceph_decode_need(p, end, export_targets_len, bad);
 			pexport_targets = *p;
-			*p += num_export_targets * sizeof(u32);
+			*p += export_targets_len;
 		} else {
 			num_export_targets = 0;
 		}
@@ -234,20 +241,18 @@ struct ceph_mdsmap *ceph_mdsmap_decode(struct ceph_mds_client *mdsc, void **p,
 			*p = info_end;
 		}
 
-		dout("mdsmap_decode %d/%d %lld mds%d.%d %s %s%s\n",
-		     i+1, n, global_id, mds, inc,
-		     ceph_pr_addr(&addr),
-		     ceph_mds_state_name(state),
-		     laggy ? "(laggy)" : "");
+		doutc(cl, "%d/%d %lld mds%d.%d %s %s%s\n", i+1, n, global_id,
+		      mds, inc, ceph_pr_addr(&addr),
+		      ceph_mds_state_name(state), laggy ? "(laggy)" : "");
 
 		if (mds < 0 || mds >= m->possible_max_rank) {
-			pr_warn("mdsmap_decode got incorrect mds(%d)\n", mds);
+			pr_warn_client(cl, "got incorrect mds(%d)\n", mds);
 			continue;
 		}
 
 		if (state <= 0) {
-			dout("mdsmap_decode got incorrect state(%s)\n",
-			     ceph_mds_state_name(state));
+			doutc(cl, "got incorrect state(%s)\n",
+			      ceph_mds_state_name(state));
 			continue;
 		}
 
@@ -264,6 +269,10 @@ struct ceph_mdsmap *ceph_mdsmap_decode(struct ceph_mds_client *mdsc, void **p,
 				goto nomem;
 			for (j = 0; j < num_export_targets; j++) {
 				target = ceph_decode_32(&pexport_targets);
+				if (target >= CEPH_MAX_MDS) {
+					err = -EIO;
+					goto corrupt;
+				}
 				info->export_targets[j] = target;
 			}
 		} else {
@@ -387,16 +396,16 @@ struct ceph_mdsmap *ceph_mdsmap_decode(struct ceph_mds_client *mdsc, void **p,
 		ceph_decode_64_safe(p, end, m->m_max_xattr_size, bad_ext);
 	}
 bad_ext:
-	dout("mdsmap_decode m_enabled: %d, m_damaged: %d, m_num_laggy: %d\n",
-	     !!m->m_enabled, !!m->m_damaged, m->m_num_laggy);
+	doutc(cl, "m_enabled: %d, m_damaged: %d, m_num_laggy: %d\n",
+	      !!m->m_enabled, !!m->m_damaged, m->m_num_laggy);
 	*p = end;
-	dout("mdsmap_decode success epoch %u\n", m->m_epoch);
+	doutc(cl, "success epoch %u\n", m->m_epoch);
 	return m;
 nomem:
 	err = -ENOMEM;
 	goto out_err;
 corrupt:
-	pr_err("corrupt mdsmap\n");
+	pr_err_client(cl, "corrupt mdsmap\n");
 	print_hex_dump(KERN_DEBUG, "mdsmap: ",
 		       DUMP_PREFIX_OFFSET, 16, 1,
 		       start, end - start, true);

@@ -1726,6 +1726,13 @@ static int super_1_load(struct md_rdev *rdev, struct md_rdev *refdev, int minor_
 				  rdev->bb_page, REQ_OP_READ, true))
 			return -EIO;
 		bbp = (__le64 *)page_address(rdev->bb_page);
+
+		/* check for badblocks api. */
+		if (sb->bblog_shift >= BITS_PER_TYPE(sector_t)) {
+			pr_err("md: %pg: bogus bblog_shift %u for badblocks.\n",
+			       rdev->bdev, sb->bblog_shift);
+			return -EINVAL;
+		}
 		rdev->badblocks.shift = sb->bblog_shift;
 		for (i = 0 ; i < (sectors << (9-3)) ; i++, bbp++) {
 			u64 bb = le64_to_cpu(*bbp);
@@ -8764,6 +8771,8 @@ static void md_clone_bio(struct mddev *mddev, struct bio **bio)
 	md_io_clone->mddev = mddev;
 	if (blk_queue_io_stat(bdev->bd_disk->queue))
 		md_io_clone->start_time = bio_start_io_acct(*bio);
+	else
+		md_io_clone->start_time = 0;
 
 	if (bio_data_dir(*bio) == WRITE && mddev->bitmap) {
 		md_io_clone->offset = (*bio)->bi_iter.bi_sector;

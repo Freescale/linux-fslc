@@ -72,6 +72,15 @@ static inline bool tcf_block_non_null_shared(struct tcf_block *block)
 	return block && block->index;
 }
 
+#ifdef CONFIG_NET_CLS_ACT
+DECLARE_STATIC_KEY_FALSE(tcf_sw_enabled_key);
+
+static inline bool tcf_block_bypass_sw(struct tcf_block *block)
+{
+	return block && !atomic_read(&block->useswcnt);
+}
+#endif
+
 static inline struct Qdisc *tcf_block_q(struct tcf_block *block)
 {
 	WARN_ON(tcf_block_shared(block));
@@ -152,6 +161,22 @@ static inline unsigned long
 __cls_set_class(unsigned long *clp, unsigned long cl)
 {
 	return xchg(clp, cl);
+}
+
+struct tc_skb_cb;
+
+static inline struct tc_skb_cb *tc_skb_cb(const struct sk_buff *skb);
+
+static inline enum skb_drop_reason
+tcf_get_drop_reason(const struct sk_buff *skb)
+{
+	return tc_skb_cb(skb)->drop_reason;
+}
+
+static inline void tcf_set_drop_reason(const struct sk_buff *skb,
+				       enum skb_drop_reason reason)
+{
+	tc_skb_cb(skb)->drop_reason = reason;
 }
 
 static inline void
@@ -748,6 +773,15 @@ tc_cls_common_offload_init(struct flow_cls_common_offload *cls_common,
 	cls_common->prio = tp->prio >> 16;
 	if (tc_skip_sw(flags) || flags & TCA_CLS_FLAGS_VERBOSE)
 		cls_common->extack = extack;
+}
+
+static inline void tcf_proto_update_usesw(struct tcf_proto *tp, u32 flags)
+{
+	if (tp->usesw)
+		return;
+	if (tc_skip_sw(flags) && tc_in_hw(flags))
+		return;
+	tp->usesw = true;
 }
 
 #if IS_ENABLED(CONFIG_NET_TC_SKB_EXT)

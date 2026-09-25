@@ -119,9 +119,12 @@ int skb_gro_receive(struct sk_buff *p, struct sk_buff *skb)
 
 	if (unlikely(p->len + len >= GRO_LEGACY_MAX_SIZE)) {
 		if (NAPI_GRO_CB(skb)->proto != IPPROTO_TCP ||
+		    NAPI_GRO_CB(skb)->encap_mark ||
+		    p->encapsulation ||
 		    (p->protocol == htons(ETH_P_IPV6) &&
-		     skb_headroom(p) < sizeof(struct hop_jumbo_hdr)) ||
-		    p->encapsulation)
+		     p->mac_header < sizeof(struct hop_jumbo_hdr)) ||
+		    (p->protocol != htons(ETH_P_IPV6) &&
+		     p->protocol != htons(ETH_P_IP)))
 			return -E2BIG;
 	}
 
@@ -227,6 +230,37 @@ done:
 		skb_shinfo(lp)->flags |= skbinfo->flags & SKBFL_SHARED_FRAG;
 	}
 	NAPI_GRO_CB(skb)->same_flow = 1;
+	return 0;
+}
+
+int skb_gro_receive_list(struct sk_buff *p, struct sk_buff *skb)
+{
+	/* make sure to check flush flag and to not merge */
+	if (unlikely(p->len + skb->len >= 65536 ||
+		     NAPI_GRO_CB(skb)->flush))
+		return -E2BIG;
+
+	if (NAPI_GRO_CB(p)->last == p)
+		skb_shinfo(p)->frag_list = skb;
+	else
+		NAPI_GRO_CB(p)->last->next = skb;
+
+	skb_pull(skb, skb_gro_offset(skb));
+
+	NAPI_GRO_CB(p)->last = skb;
+	NAPI_GRO_CB(p)->count++;
+	p->data_len += skb->len;
+
+	/* sk ownership - if any - completely transferred to the aggregated packet */
+	skb->destructor = NULL;
+	skb->sk = NULL;
+	p->truesize += skb->truesize;
+	p->len += skb->len;
+
+	skb_shinfo(p)->flags |= skb_shinfo(skb)->flags & SKBFL_SHARED_FRAG;
+
+	NAPI_GRO_CB(skb)->same_flow = 1;
+
 	return 0;
 }
 

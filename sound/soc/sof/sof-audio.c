@@ -139,7 +139,6 @@ static int sof_widget_setup_unlocked(struct snd_sof_dev *sdev,
 {
 	const struct sof_ipc_tplg_ops *tplg_ops = sof_ipc_get_ops(sdev, tplg);
 	struct snd_sof_pipeline *spipe = swidget->spipe;
-	bool use_count_decremented = false;
 	int ret;
 	int i;
 
@@ -218,9 +217,10 @@ static int sof_widget_setup_unlocked(struct snd_sof_dev *sdev,
 	return 0;
 
 widget_free:
-	/* widget use_count will be decremented by sof_widget_free() */
+	/* widget use_count and core_put handled by sof_widget_free() */
 	sof_widget_free_unlocked(sdev, swidget);
-	use_count_decremented = true;
+	return ret;
+
 pipe_widget_free:
 	if (swidget->id != snd_soc_dapm_scheduler) {
 		sof_widget_free_unlocked(sdev, swidget->spipe->pipe_widget);
@@ -235,8 +235,7 @@ pipe_widget_free:
 		}
 	}
 use_count_dec:
-	if (!use_count_decremented)
-		swidget->use_count--;
+	swidget->use_count--;
 
 	return ret;
 }
@@ -830,42 +829,6 @@ bool snd_sof_stream_suspend_ignored(struct snd_sof_dev *sdev)
 	}
 
 	return false;
-}
-
-int sof_pcm_stream_free(struct snd_sof_dev *sdev, struct snd_pcm_substream *substream,
-			struct snd_sof_pcm *spcm, int dir, bool free_widget_list)
-{
-	const struct sof_ipc_pcm_ops *pcm_ops = sof_ipc_get_ops(sdev, pcm);
-	int ret;
-
-	if (spcm->prepared[substream->stream]) {
-		/* stop DMA first if needed */
-		if (pcm_ops && pcm_ops->platform_stop_during_hw_free)
-			snd_sof_pcm_platform_trigger(sdev, substream, SNDRV_PCM_TRIGGER_STOP);
-
-		/* Send PCM_FREE IPC to reset pipeline */
-		if (pcm_ops && pcm_ops->hw_free) {
-			ret = pcm_ops->hw_free(sdev->component, substream);
-			if (ret < 0)
-				return ret;
-		}
-
-		spcm->prepared[substream->stream] = false;
-	}
-
-	/* reset the DMA */
-	ret = snd_sof_pcm_platform_hw_free(sdev, substream);
-	if (ret < 0)
-		return ret;
-
-	/* free widget list */
-	if (free_widget_list) {
-		ret = sof_widget_list_free(sdev, spcm, dir);
-		if (ret < 0)
-			dev_err(sdev->dev, "failed to free widgets during suspend\n");
-	}
-
-	return ret;
 }
 
 /*

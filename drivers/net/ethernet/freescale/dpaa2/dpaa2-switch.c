@@ -1650,6 +1650,7 @@ static void dpaa2_switch_port_disconnect_mac(struct ethsw_port_priv *port_priv)
 
 	dpaa2_mac_close(mac);
 	dpaa2_mac_driver_attach(mac->mc_dev);
+	put_device(&mac->mc_dev->dev);
 	kfree(mac);
 }
 

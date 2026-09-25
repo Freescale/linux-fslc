@@ -32,7 +32,7 @@
 
 static size_t pagesize;
 static int pagemap_fd;
-static size_t thpsize;
+static size_t pmdsize;
 static int nr_hugetlbsizes;
 static size_t hugetlbsizes[10];
 static int gup_fd;
@@ -78,9 +78,12 @@ struct comm_pipes {
 
 static int setup_comm_pipes(struct comm_pipes *comm_pipes)
 {
-	if (pipe(comm_pipes->child_ready) < 0)
+	if (pipe(comm_pipes->child_ready) < 0) {
+		ksft_perror("pipe()");
 		return -errno;
+	}
 	if (pipe(comm_pipes->parent_ready) < 0) {
+		ksft_perror("pipe()");
 		close(comm_pipes->child_ready[0]);
 		close(comm_pipes->child_ready[1]);
 		return -errno;
@@ -165,7 +168,7 @@ static int child_vmsplice_memcmp_fn(char *mem, size_t size,
 typedef int (*child_fn)(char *mem, size_t size, struct comm_pipes *comm_pipes);
 
 static void do_test_cow_in_parent(char *mem, size_t size, bool do_mprotect,
-				  child_fn fn)
+		child_fn fn, bool xfail)
 {
 	struct comm_pipes comm_pipes;
 	char buf;
@@ -173,13 +176,14 @@ static void do_test_cow_in_parent(char *mem, size_t size, bool do_mprotect,
 
 	ret = setup_comm_pipes(&comm_pipes);
 	if (ret) {
-		ksft_test_result_fail("pipe() failed\n");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	ret = fork();
 	if (ret < 0) {
-		ksft_test_result_fail("fork() failed\n");
+		ksft_perror("fork() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_comm_pipes;
 	} else if (!ret) {
 		exit(fn(mem, size, &comm_pipes));
@@ -194,9 +198,18 @@ static void do_test_cow_in_parent(char *mem, size_t size, bool do_mprotect,
 		 * write-faults by directly mapping pages writable.
 		 */
 		ret = mprotect(mem, size, PROT_READ);
-		ret |= mprotect(mem, size, PROT_READ|PROT_WRITE);
 		if (ret) {
-			ksft_test_result_fail("mprotect() failed\n");
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
+			write(comm_pipes.parent_ready[1], "0", 1);
+			wait(&ret);
+			goto close_comm_pipes;
+		}
+
+		ret = mprotect(mem, size, PROT_READ|PROT_WRITE);
+		if (ret) {
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
 			write(comm_pipes.parent_ready[1], "0", 1);
 			wait(&ret);
 			goto close_comm_pipes;
@@ -213,33 +226,47 @@ static void do_test_cow_in_parent(char *mem, size_t size, bool do_mprotect,
 	else
 		ret = -EINVAL;
 
-	ksft_test_result(!ret, "No leak from parent into child\n");
+	if (!ret) {
+		log_test_result(KSFT_PASS);
+	} else if (xfail) {
+		/*
+		 * With hugetlb, some vmsplice() tests are currently expected to
+		 * fail because (a) harder to fix and (b) nobody really cares.
+		 * Flag them as expected failure for now.
+		 */
+		log_test_result(KSFT_XFAIL);
+	} else {
+		log_test_result(KSFT_FAIL);
+	}
 close_comm_pipes:
 	close_comm_pipes(&comm_pipes);
 }
 
-static void test_cow_in_parent(char *mem, size_t size)
+static void test_cow_in_parent(char *mem, size_t size, bool is_hugetlb)
 {
-	do_test_cow_in_parent(mem, size, false, child_memcmp_fn);
+	do_test_cow_in_parent(mem, size, false, child_memcmp_fn, false);
 }
 
-static void test_cow_in_parent_mprotect(char *mem, size_t size)
+static void test_cow_in_parent_mprotect(char *mem, size_t size, bool is_hugetlb)
 {
-	do_test_cow_in_parent(mem, size, true, child_memcmp_fn);
+	do_test_cow_in_parent(mem, size, true, child_memcmp_fn, false);
 }
 
-static void test_vmsplice_in_child(char *mem, size_t size)
+static void test_vmsplice_in_child(char *mem, size_t size, bool is_hugetlb)
 {
-	do_test_cow_in_parent(mem, size, false, child_vmsplice_memcmp_fn);
+	do_test_cow_in_parent(mem, size, false, child_vmsplice_memcmp_fn,
+			      is_hugetlb);
 }
 
-static void test_vmsplice_in_child_mprotect(char *mem, size_t size)
+static void test_vmsplice_in_child_mprotect(char *mem, size_t size,
+		bool is_hugetlb)
 {
-	do_test_cow_in_parent(mem, size, true, child_vmsplice_memcmp_fn);
+	do_test_cow_in_parent(mem, size, true, child_vmsplice_memcmp_fn,
+			      is_hugetlb);
 }
 
 static void do_test_vmsplice_in_parent(char *mem, size_t size,
-				       bool before_fork)
+				       bool before_fork, bool xfail)
 {
 	struct iovec iov = {
 		.iov_base = mem,
@@ -258,26 +285,29 @@ static void do_test_vmsplice_in_parent(char *mem, size_t size,
 
 	ret = setup_comm_pipes(&comm_pipes);
 	if (ret) {
-		ksft_test_result_fail("pipe() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto free;
 	}
 
 	if (pipe(fds) < 0) {
-		ksft_test_result_fail("pipe() failed\n");
+		ksft_perror("pipe() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_comm_pipes;
 	}
 
 	if (before_fork) {
 		transferred = vmsplice(fds[1], &iov, 1, 0);
 		if (transferred <= 0) {
-			ksft_test_result_fail("vmsplice() failed\n");
+			ksft_print_msg("vmsplice() failed\n");
+			log_test_result(KSFT_FAIL);
 			goto close_pipe;
 		}
 	}
 
 	ret = fork();
 	if (ret < 0) {
-		ksft_test_result_fail("fork() failed\n");
+		ksft_perror("fork() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto close_pipe;
 	} else if (!ret) {
 		write(comm_pipes.child_ready[1], "0", 1);
@@ -291,7 +321,8 @@ static void do_test_vmsplice_in_parent(char *mem, size_t size,
 	if (!before_fork) {
 		transferred = vmsplice(fds[1], &iov, 1, 0);
 		if (transferred <= 0) {
-			ksft_test_result_fail("vmsplice() failed\n");
+			ksft_perror("vmsplice() failed");
+			log_test_result(KSFT_FAIL);
 			wait(&ret);
 			goto close_pipe;
 		}
@@ -300,7 +331,8 @@ static void do_test_vmsplice_in_parent(char *mem, size_t size,
 	while (read(comm_pipes.child_ready[0], &buf, 1) != 1)
 		;
 	if (munmap(mem, size) < 0) {
-		ksft_test_result_fail("munmap() failed\n");
+		ksft_perror("munmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_pipe;
 	}
 	write(comm_pipes.parent_ready[1], "0", 1);
@@ -308,7 +340,8 @@ static void do_test_vmsplice_in_parent(char *mem, size_t size,
 	/* Wait until the child is done writing. */
 	wait(&ret);
 	if (!WIFEXITED(ret)) {
-		ksft_test_result_fail("wait() failed\n");
+		ksft_perror("wait() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_pipe;
 	}
 
@@ -316,13 +349,24 @@ static void do_test_vmsplice_in_parent(char *mem, size_t size,
 	for (total = 0; total < transferred; total += cur) {
 		cur = read(fds[0], new + total, transferred - total);
 		if (cur < 0) {
-			ksft_test_result_fail("read() failed\n");
+			ksft_perror("read() failed");
+			log_test_result(KSFT_FAIL);
 			goto close_pipe;
 		}
 	}
 
-	ksft_test_result(!memcmp(old, new, transferred),
-			 "No leak from child into parent\n");
+	if (!memcmp(old, new, transferred)) {
+		log_test_result(KSFT_PASS);
+	} else if (xfail) {
+		/*
+		 * With hugetlb, some vmsplice() tests are currently expected to
+		 * fail because (a) harder to fix and (b) nobody really cares.
+		 * Flag them as expected failure for now.
+		 */
+		log_test_result(KSFT_XFAIL);
+	} else {
+		log_test_result(KSFT_FAIL);
+	}
 close_pipe:
 	close(fds[0]);
 	close(fds[1]);
@@ -333,14 +377,14 @@ free:
 	free(new);
 }
 
-static void test_vmsplice_before_fork(char *mem, size_t size)
+static void test_vmsplice_before_fork(char *mem, size_t size, bool is_hugetlb)
 {
-	do_test_vmsplice_in_parent(mem, size, true);
+	do_test_vmsplice_in_parent(mem, size, true, is_hugetlb);
 }
 
-static void test_vmsplice_after_fork(char *mem, size_t size)
+static void test_vmsplice_after_fork(char *mem, size_t size, bool is_hugetlb)
 {
-	do_test_vmsplice_in_parent(mem, size, false);
+	do_test_vmsplice_in_parent(mem, size, false, is_hugetlb);
 }
 
 #ifdef LOCAL_CONFIG_HAVE_LIBURING
@@ -358,13 +402,14 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 
 	ret = setup_comm_pipes(&comm_pipes);
 	if (ret) {
-		ksft_test_result_fail("pipe() failed\n");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	file = tmpfile();
 	if (!file) {
-		ksft_test_result_fail("tmpfile() failed\n");
+		ksft_perror("tmpfile() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_comm_pipes;
 	}
 	fd = fileno(file);
@@ -372,14 +417,16 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 
 	tmp = malloc(size);
 	if (!tmp) {
-		ksft_test_result_fail("malloc() failed\n");
+		ksft_print_msg("malloc() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto close_file;
 	}
 
 	/* Skip on errors, as we might just lack kernel support. */
 	ret = io_uring_queue_init(1, &ring, 0);
 	if (ret < 0) {
-		ksft_test_result_skip("io_uring_queue_init() failed\n");
+		ksft_print_msg("io_uring_queue_init() failed\n");
+		log_test_result(KSFT_SKIP);
 		goto free_tmp;
 	}
 
@@ -394,7 +441,8 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 	iov.iov_len = size;
 	ret = io_uring_register_buffers(&ring, &iov, 1);
 	if (ret) {
-		ksft_test_result_skip("io_uring_register_buffers() failed\n");
+		ksft_print_msg("io_uring_register_buffers() failed\n");
+		log_test_result(KSFT_SKIP);
 		goto queue_exit;
 	}
 
@@ -405,7 +453,8 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 		 */
 		ret = fork();
 		if (ret < 0) {
-			ksft_test_result_fail("fork() failed\n");
+			ksft_perror("fork() failed");
+			log_test_result(KSFT_FAIL);
 			goto unregister_buffers;
 		} else if (!ret) {
 			write(comm_pipes.child_ready[1], "0", 1);
@@ -425,10 +474,17 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 		 * if the page is mapped R/O vs. R/W).
 		 */
 		ret = mprotect(mem, size, PROT_READ);
-		clear_softdirty();
-		ret |= mprotect(mem, size, PROT_READ | PROT_WRITE);
 		if (ret) {
-			ksft_test_result_fail("mprotect() failed\n");
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
+			goto unregister_buffers;
+		}
+
+		clear_softdirty();
+		ret = mprotect(mem, size, PROT_READ | PROT_WRITE);
+		if (ret) {
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
 			goto unregister_buffers;
 		}
 	}
@@ -440,25 +496,29 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 	memset(mem, 0xff, size);
 	sqe = io_uring_get_sqe(&ring);
 	if (!sqe) {
-		ksft_test_result_fail("io_uring_get_sqe() failed\n");
+		ksft_print_msg("io_uring_get_sqe() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto quit_child;
 	}
 	io_uring_prep_write_fixed(sqe, fd, mem, size, 0, 0);
 
 	ret = io_uring_submit(&ring);
 	if (ret < 0) {
-		ksft_test_result_fail("io_uring_submit() failed\n");
+		ksft_print_msg("io_uring_submit() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto quit_child;
 	}
 
 	ret = io_uring_wait_cqe(&ring, &cqe);
 	if (ret < 0) {
-		ksft_test_result_fail("io_uring_wait_cqe() failed\n");
+		ksft_print_msg("io_uring_wait_cqe() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto quit_child;
 	}
 
 	if (cqe->res != size) {
-		ksft_test_result_fail("write_fixed failed\n");
+		ksft_print_msg("write_fixed failed\n");
+		log_test_result(KSFT_FAIL);
 		goto quit_child;
 	}
 	io_uring_cqe_seen(&ring, cqe);
@@ -468,15 +528,18 @@ static void do_test_iouring(char *mem, size_t size, bool use_fork)
 	while (total < size) {
 		cur = pread(fd, tmp + total, size - total, total);
 		if (cur < 0) {
-			ksft_test_result_fail("pread() failed\n");
+			ksft_print_msg("pread() failed\n");
+			log_test_result(KSFT_FAIL);
 			goto quit_child;
 		}
 		total += cur;
 	}
 
 	/* Finally, check if we read what we expected. */
-	ksft_test_result(!memcmp(mem, tmp, size),
-			 "Longterm R/W pin is reliable\n");
+	if (!memcmp(mem, tmp, size))
+		log_test_result(KSFT_PASS);
+	else
+		log_test_result(KSFT_FAIL);
 
 quit_child:
 	if (use_fork) {
@@ -495,12 +558,12 @@ close_comm_pipes:
 	close_comm_pipes(&comm_pipes);
 }
 
-static void test_iouring_ro(char *mem, size_t size)
+static void test_iouring_ro(char *mem, size_t size, bool is_hugetlb)
 {
 	do_test_iouring(mem, size, false);
 }
 
-static void test_iouring_fork(char *mem, size_t size)
+static void test_iouring_fork(char *mem, size_t size, bool is_hugetlb)
 {
 	do_test_iouring(mem, size, true);
 }
@@ -524,19 +587,21 @@ static void do_test_ro_pin(char *mem, size_t size, enum ro_pin_test test,
 	int ret;
 
 	if (gup_fd < 0) {
-		ksft_test_result_skip("gup_test not available\n");
+		ksft_print_msg("gup_test not available\n");
+		log_test_result(KSFT_SKIP);
 		return;
 	}
 
 	tmp = malloc(size);
 	if (!tmp) {
-		ksft_test_result_fail("malloc() failed\n");
+		ksft_print_msg("malloc() failed\n");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	ret = setup_comm_pipes(&comm_pipes);
 	if (ret) {
-		ksft_test_result_fail("pipe() failed\n");
+		log_test_result(KSFT_FAIL);
 		goto free_tmp;
 	}
 
@@ -551,7 +616,8 @@ static void do_test_ro_pin(char *mem, size_t size, enum ro_pin_test test,
 		 */
 		ret = fork();
 		if (ret < 0) {
-			ksft_test_result_fail("fork() failed\n");
+			ksft_perror("fork() failed");
+			log_test_result(KSFT_FAIL);
 			goto close_comm_pipes;
 		} else if (!ret) {
 			write(comm_pipes.child_ready[1], "0", 1);
@@ -588,7 +654,8 @@ static void do_test_ro_pin(char *mem, size_t size, enum ro_pin_test test,
 		clear_softdirty();
 		ret |= mprotect(mem, size, PROT_READ | PROT_WRITE);
 		if (ret) {
-			ksft_test_result_fail("mprotect() failed\n");
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
 			goto close_comm_pipes;
 		}
 		break;
@@ -603,9 +670,11 @@ static void do_test_ro_pin(char *mem, size_t size, enum ro_pin_test test,
 	ret = ioctl(gup_fd, PIN_LONGTERM_TEST_START, &args);
 	if (ret) {
 		if (errno == EINVAL)
-			ksft_test_result_skip("PIN_LONGTERM_TEST_START failed\n");
+			ret = KSFT_SKIP;
 		else
-			ksft_test_result_fail("PIN_LONGTERM_TEST_START failed\n");
+			ret = KSFT_FAIL;
+		ksft_perror("PIN_LONGTERM_TEST_START failed");
+		log_test_result(ret);
 		goto wait;
 	}
 
@@ -618,22 +687,26 @@ static void do_test_ro_pin(char *mem, size_t size, enum ro_pin_test test,
 	 */
 	tmp_val = (__u64)(uintptr_t)tmp;
 	ret = ioctl(gup_fd, PIN_LONGTERM_TEST_READ, &tmp_val);
-	if (ret)
-		ksft_test_result_fail("PIN_LONGTERM_TEST_READ failed\n");
-	else
-		ksft_test_result(!memcmp(mem, tmp, size),
-				 "Longterm R/O pin is reliable\n");
+	if (ret) {
+		ksft_perror("PIN_LONGTERM_TEST_READ failed");
+		log_test_result(KSFT_FAIL);
+	} else {
+		if (!memcmp(mem, tmp, size))
+			log_test_result(KSFT_PASS);
+		else
+			log_test_result(KSFT_FAIL);
+	}
 
 	ret = ioctl(gup_fd, PIN_LONGTERM_TEST_STOP);
 	if (ret)
-		ksft_print_msg("[INFO] PIN_LONGTERM_TEST_STOP failed\n");
+		ksft_perror("PIN_LONGTERM_TEST_STOP failed");
 wait:
 	switch (test) {
 	case RO_PIN_TEST_SHARED:
 		write(comm_pipes.parent_ready[1], "0", 1);
 		wait(&ret);
 		if (!WIFEXITED(ret))
-			ksft_print_msg("[INFO] wait() failed\n");
+			ksft_perror("wait() failed");
 		break;
 	default:
 		break;
@@ -644,37 +717,41 @@ free_tmp:
 	free(tmp);
 }
 
-static void test_ro_pin_on_shared(char *mem, size_t size)
+static void test_ro_pin_on_shared(char *mem, size_t size, bool is_hugetlb)
 {
 	do_test_ro_pin(mem, size, RO_PIN_TEST_SHARED, false);
 }
 
-static void test_ro_fast_pin_on_shared(char *mem, size_t size)
+static void test_ro_fast_pin_on_shared(char *mem, size_t size, bool is_hugetlb)
 {
 	do_test_ro_pin(mem, size, RO_PIN_TEST_SHARED, true);
 }
 
-static void test_ro_pin_on_ro_previously_shared(char *mem, size_t size)
+static void test_ro_pin_on_ro_previously_shared(char *mem, size_t size,
+		bool is_hugetlb)
 {
 	do_test_ro_pin(mem, size, RO_PIN_TEST_PREVIOUSLY_SHARED, false);
 }
 
-static void test_ro_fast_pin_on_ro_previously_shared(char *mem, size_t size)
+static void test_ro_fast_pin_on_ro_previously_shared(char *mem, size_t size,
+		bool is_hugetlb)
 {
 	do_test_ro_pin(mem, size, RO_PIN_TEST_PREVIOUSLY_SHARED, true);
 }
 
-static void test_ro_pin_on_ro_exclusive(char *mem, size_t size)
+static void test_ro_pin_on_ro_exclusive(char *mem, size_t size,
+		bool is_hugetlb)
 {
 	do_test_ro_pin(mem, size, RO_PIN_TEST_RO_EXCLUSIVE, false);
 }
 
-static void test_ro_fast_pin_on_ro_exclusive(char *mem, size_t size)
+static void test_ro_fast_pin_on_ro_exclusive(char *mem, size_t size,
+		bool is_hugetlb)
 {
 	do_test_ro_pin(mem, size, RO_PIN_TEST_RO_EXCLUSIVE, true);
 }
 
-typedef void (*test_fn)(char *mem, size_t size);
+typedef void (*test_fn)(char *mem, size_t size, bool hugetlb);
 
 static void do_run_with_base_page(test_fn fn, bool swapout)
 {
@@ -684,14 +761,16 @@ static void do_run_with_base_page(test_fn fn, bool swapout)
 	mem = mmap(NULL, pagesize, PROT_READ | PROT_WRITE,
 		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	ret = madvise(mem, pagesize, MADV_NOHUGEPAGE);
 	/* Ignore if not around on a kernel. */
 	if (ret && errno != EINVAL) {
-		ksft_test_result_fail("MADV_NOHUGEPAGE failed\n");
+		ksft_perror("MADV_NOHUGEPAGE failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
@@ -701,25 +780,26 @@ static void do_run_with_base_page(test_fn fn, bool swapout)
 	if (swapout) {
 		madvise(mem, pagesize, MADV_PAGEOUT);
 		if (!pagemap_is_swapped(pagemap_fd, mem)) {
-			ksft_test_result_skip("MADV_PAGEOUT did not work, is swap enabled?\n");
+			ksft_print_msg("MADV_PAGEOUT did not work, is swap enabled?\n");
+			log_test_result(KSFT_SKIP);
 			goto munmap;
 		}
 	}
 
-	fn(mem, pagesize);
+	fn(mem, pagesize, false);
 munmap:
 	munmap(mem, pagesize);
 }
 
 static void run_with_base_page(test_fn fn, const char *desc)
 {
-	ksft_print_msg("[RUN] %s ... with base page\n", desc);
+	log_test_start("%s ... with base page", desc);
 	do_run_with_base_page(fn, false);
 }
 
 static void run_with_base_page_swap(test_fn fn, const char *desc)
 {
-	ksft_print_msg("[RUN] %s ... with swapped out base page\n", desc);
+	log_test_start("%s ... with swapped out base page", desc);
 	do_run_with_base_page(fn, true);
 }
 
@@ -734,7 +814,7 @@ enum thp_run {
 	THP_RUN_PARTIAL_SHARED,
 };
 
-static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
+static void do_run_with_thp(test_fn fn, enum thp_run thp_run, size_t thpsize)
 {
 	char *mem, *mmap_mem, *tmp, *mremap_mem = MAP_FAILED;
 	size_t size, mmap_size, mremap_size;
@@ -745,7 +825,8 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 	mmap_mem = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (mmap_mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
@@ -754,17 +835,19 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 
 	ret = madvise(mem, thpsize, MADV_HUGEPAGE);
 	if (ret) {
-		ksft_test_result_fail("MADV_HUGEPAGE failed\n");
+		ksft_perror("MADV_HUGEPAGE failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
 	/*
-	 * Try to populate a THP. Touch the first sub-page and test if we get
-	 * another sub-page populated automatically.
+	 * Try to populate a THP. Touch the first sub-page and test if
+	 * we get the last sub-page populated automatically.
 	 */
 	mem[0] = 0;
-	if (!pagemap_is_populated(pagemap_fd, mem + pagesize)) {
-		ksft_test_result_skip("Did not get a THP populated\n");
+	if (!pagemap_is_populated(pagemap_fd, mem + thpsize - pagesize)) {
+		ksft_print_msg("Did not get a THP populated\n");
+		log_test_result(KSFT_SKIP);
 		goto munmap;
 	}
 	memset(mem, 0, thpsize);
@@ -773,21 +856,25 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 	switch (thp_run) {
 	case THP_RUN_PMD:
 	case THP_RUN_PMD_SWAPOUT:
+		assert(thpsize == pmdsize);
 		break;
 	case THP_RUN_PTE:
 	case THP_RUN_PTE_SWAPOUT:
 		/*
 		 * Trigger PTE-mapping the THP by temporarily mapping a single
-		 * subpage R/O.
+		 * subpage R/O. This is a noop if the THP is not pmdsize (and
+		 * therefore already PTE-mapped).
 		 */
 		ret = mprotect(mem + pagesize, pagesize, PROT_READ);
 		if (ret) {
-			ksft_test_result_fail("mprotect() failed\n");
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		ret = mprotect(mem + pagesize, pagesize, PROT_READ | PROT_WRITE);
 		if (ret) {
-			ksft_test_result_fail("mprotect() failed\n");
+			ksft_perror("mprotect() failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		break;
@@ -799,7 +886,8 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 		 */
 		ret = madvise(mem + pagesize, thpsize - pagesize, MADV_DONTNEED);
 		if (ret) {
-			ksft_test_result_fail("MADV_DONTNEED failed\n");
+			ksft_perror("MADV_DONTNEED failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		size = pagesize;
@@ -813,13 +901,15 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 		mremap_mem = mmap(NULL, mremap_size, PROT_NONE,
 				  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (mremap_mem == MAP_FAILED) {
-			ksft_test_result_fail("mmap() failed\n");
+			ksft_perror("mmap() failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		tmp = mremap(mem + mremap_size, mremap_size, mremap_size,
 			     MREMAP_MAYMOVE | MREMAP_FIXED, mremap_mem);
 		if (tmp != mremap_mem) {
-			ksft_test_result_fail("mremap() failed\n");
+			ksft_perror("mremap() failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		size = mremap_size;
@@ -832,12 +922,14 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 		 */
 		ret = madvise(mem + pagesize, thpsize - pagesize, MADV_DONTFORK);
 		if (ret) {
-			ksft_test_result_fail("MADV_DONTFORK failed\n");
+			ksft_perror("MADV_DONTFORK failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		ret = fork();
 		if (ret < 0) {
-			ksft_test_result_fail("fork() failed\n");
+			ksft_perror("fork() failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		} else if (!ret) {
 			exit(0);
@@ -846,7 +938,8 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 		/* Allow for sharing all pages again. */
 		ret = madvise(mem + pagesize, thpsize - pagesize, MADV_DOFORK);
 		if (ret) {
-			ksft_test_result_fail("MADV_DOFORK failed\n");
+			ksft_perror("MADV_DOFORK failed");
+			log_test_result(KSFT_FAIL);
 			goto munmap;
 		}
 		break;
@@ -860,7 +953,8 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 	case THP_RUN_SINGLE_PTE_SWAPOUT:
 		madvise(mem, size, MADV_PAGEOUT);
 		if (!range_is_swapped(mem, size)) {
-			ksft_test_result_skip("MADV_PAGEOUT did not work, is swap enabled?\n");
+			ksft_print_msg("MADV_PAGEOUT did not work, is swap enabled?\n");
+			log_test_result(KSFT_SKIP);
 			goto munmap;
 		}
 		break;
@@ -868,59 +962,67 @@ static void do_run_with_thp(test_fn fn, enum thp_run thp_run)
 		break;
 	}
 
-	fn(mem, size);
+	fn(mem, size, false);
 munmap:
 	munmap(mmap_mem, mmap_size);
 	if (mremap_mem != MAP_FAILED)
 		munmap(mremap_mem, mremap_size);
 }
 
-static void run_with_thp(test_fn fn, const char *desc)
+static void run_with_thp(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_PMD);
+	log_test_start("%s ... with THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_PMD, size);
 }
 
-static void run_with_thp_swap(test_fn fn, const char *desc)
+static void run_with_thp_swap(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with swapped-out THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_PMD_SWAPOUT);
+	log_test_start("%s ... with swapped-out THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_PMD_SWAPOUT, size);
 }
 
-static void run_with_pte_mapped_thp(test_fn fn, const char *desc)
+static void run_with_pte_mapped_thp(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with PTE-mapped THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_PTE);
+	log_test_start("%s ... with PTE-mapped THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_PTE, size);
 }
 
-static void run_with_pte_mapped_thp_swap(test_fn fn, const char *desc)
+static void run_with_pte_mapped_thp_swap(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with swapped-out, PTE-mapped THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_PTE_SWAPOUT);
+	log_test_start("%s ... with swapped-out, PTE-mapped THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_PTE_SWAPOUT, size);
 }
 
-static void run_with_single_pte_of_thp(test_fn fn, const char *desc)
+static void run_with_single_pte_of_thp(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with single PTE of THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_SINGLE_PTE);
+	log_test_start("%s ... with single PTE of THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_SINGLE_PTE, size);
 }
 
-static void run_with_single_pte_of_thp_swap(test_fn fn, const char *desc)
+static void run_with_single_pte_of_thp_swap(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with single PTE of swapped-out THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_SINGLE_PTE_SWAPOUT);
+	log_test_start("%s ... with single PTE of swapped-out THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_SINGLE_PTE_SWAPOUT, size);
 }
 
-static void run_with_partial_mremap_thp(test_fn fn, const char *desc)
+static void run_with_partial_mremap_thp(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with partially mremap()'ed THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_PARTIAL_MREMAP);
+	log_test_start("%s ... with partially mremap()'ed THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_PARTIAL_MREMAP, size);
 }
 
-static void run_with_partial_shared_thp(test_fn fn, const char *desc)
+static void run_with_partial_shared_thp(test_fn fn, const char *desc, size_t size)
 {
-	ksft_print_msg("[RUN] %s ... with partially shared THP\n", desc);
-	do_run_with_thp(fn, THP_RUN_PARTIAL_SHARED);
+	log_test_start("%s ... with partially shared THP (%zu kB)",
+		desc, size / 1024);
+	do_run_with_thp(fn, THP_RUN_PARTIAL_SHARED, size);
 }
 
 static void run_with_hugetlb(test_fn fn, const char *desc, size_t hugetlbsize)
@@ -928,14 +1030,15 @@ static void run_with_hugetlb(test_fn fn, const char *desc, size_t hugetlbsize)
 	int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB;
 	char *mem, *dummy;
 
-	ksft_print_msg("[RUN] %s ... with hugetlb (%zu kB)\n", desc,
+	log_test_start("%s ... with hugetlb (%zu kB)", desc,
 		       hugetlbsize / 1024);
 
 	flags |= __builtin_ctzll(hugetlbsize) << MAP_HUGE_SHIFT;
 
 	mem = mmap(NULL, hugetlbsize, PROT_READ | PROT_WRITE, flags, -1, 0);
 	if (mem == MAP_FAILED) {
-		ksft_test_result_skip("need more free huge pages\n");
+		ksft_perror("need more free huge pages");
+		log_test_result(KSFT_SKIP);
 		return;
 	}
 
@@ -948,12 +1051,13 @@ static void run_with_hugetlb(test_fn fn, const char *desc, size_t hugetlbsize)
 	 */
 	dummy = mmap(NULL, hugetlbsize, PROT_READ | PROT_WRITE, flags, -1, 0);
 	if (dummy == MAP_FAILED) {
-		ksft_test_result_skip("need more free huge pages\n");
+		ksft_perror("need more free huge pages");
+		log_test_result(KSFT_SKIP);
 		goto munmap;
 	}
 	munmap(dummy, hugetlbsize);
 
-	fn(mem, hugetlbsize);
+	fn(mem, hugetlbsize, true);
 munmap:
 	munmap(mem, hugetlbsize);
 }
@@ -992,7 +1096,7 @@ static const struct test_case anon_test_cases[] = {
 	 */
 	{
 		"vmsplice() + unmap in child",
-		test_vmsplice_in_child
+		test_vmsplice_in_child,
 	},
 	/*
 	 * vmsplice() test, but do an additional mprotect(PROT_READ)+
@@ -1000,7 +1104,7 @@ static const struct test_case anon_test_cases[] = {
 	 */
 	{
 		"vmsplice() + unmap in child with mprotect() optimization",
-		test_vmsplice_in_child_mprotect
+		test_vmsplice_in_child_mprotect,
 	},
 	/*
 	 * vmsplice() [R/O GUP] in parent before fork(), unmap in parent after
@@ -1091,15 +1195,15 @@ static void run_anon_test_case(struct test_case const *test_case)
 
 	run_with_base_page(test_case->fn, test_case->desc);
 	run_with_base_page_swap(test_case->fn, test_case->desc);
-	if (thpsize) {
-		run_with_thp(test_case->fn, test_case->desc);
-		run_with_thp_swap(test_case->fn, test_case->desc);
-		run_with_pte_mapped_thp(test_case->fn, test_case->desc);
-		run_with_pte_mapped_thp_swap(test_case->fn, test_case->desc);
-		run_with_single_pte_of_thp(test_case->fn, test_case->desc);
-		run_with_single_pte_of_thp_swap(test_case->fn, test_case->desc);
-		run_with_partial_mremap_thp(test_case->fn, test_case->desc);
-		run_with_partial_shared_thp(test_case->fn, test_case->desc);
+	if (pmdsize) {
+		run_with_thp(test_case->fn, test_case->desc, pmdsize);
+		run_with_thp_swap(test_case->fn, test_case->desc, pmdsize);
+		run_with_pte_mapped_thp(test_case->fn, test_case->desc, pmdsize);
+		run_with_pte_mapped_thp_swap(test_case->fn, test_case->desc, pmdsize);
+		run_with_single_pte_of_thp(test_case->fn, test_case->desc, pmdsize);
+		run_with_single_pte_of_thp_swap(test_case->fn, test_case->desc, pmdsize);
+		run_with_partial_mremap_thp(test_case->fn, test_case->desc, pmdsize);
+		run_with_partial_shared_thp(test_case->fn, test_case->desc, pmdsize);
 	}
 	for (i = 0; i < nr_hugetlbsizes; i++)
 		run_with_hugetlb(test_case->fn, test_case->desc,
@@ -1120,7 +1224,7 @@ static int tests_per_anon_test_case(void)
 {
 	int tests = 2 + nr_hugetlbsizes;
 
-	if (thpsize)
+	if (pmdsize)
 		tests += 8;
 	return tests;
 }
@@ -1141,7 +1245,7 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 
 	ret = setup_comm_pipes(&comm_pipes);
 	if (ret) {
-		ksft_test_result_fail("pipe() failed\n");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
@@ -1151,12 +1255,14 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 	 */
 	ret = mprotect(mem + pagesize, pagesize, PROT_READ);
 	if (ret) {
-		ksft_test_result_fail("mprotect() failed\n");
+		ksft_perror("mprotect() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_comm_pipes;
 	}
 	ret = mprotect(mem + pagesize, pagesize, PROT_READ | PROT_WRITE);
 	if (ret) {
-		ksft_test_result_fail("mprotect() failed\n");
+		ksft_perror("mprotect() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_comm_pipes;
 	}
 
@@ -1165,8 +1271,8 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 		/* Collapse before actually COW-sharing the page. */
 		ret = madvise(mem, size, MADV_COLLAPSE);
 		if (ret) {
-			ksft_test_result_skip("MADV_COLLAPSE failed: %s\n",
-					      strerror(errno));
+			ksft_perror("MADV_COLLAPSE failed");
+			log_test_result(KSFT_SKIP);
 			goto close_comm_pipes;
 		}
 		break;
@@ -1177,7 +1283,8 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 		/* Don't COW-share the upper part of the THP. */
 		ret = madvise(mem + size / 2, size / 2, MADV_DONTFORK);
 		if (ret) {
-			ksft_test_result_fail("MADV_DONTFORK failed\n");
+			ksft_perror("MADV_DONTFORK failed");
+			log_test_result(KSFT_FAIL);
 			goto close_comm_pipes;
 		}
 		break;
@@ -1185,7 +1292,8 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 		/* Don't COW-share the lower part of the THP. */
 		ret = madvise(mem, size / 2, MADV_DONTFORK);
 		if (ret) {
-			ksft_test_result_fail("MADV_DONTFORK failed\n");
+			ksft_perror("MADV_DONTFORK failed");
+			log_test_result(KSFT_FAIL);
 			goto close_comm_pipes;
 		}
 		break;
@@ -1195,7 +1303,8 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 
 	ret = fork();
 	if (ret < 0) {
-		ksft_test_result_fail("fork() failed\n");
+		ksft_perror("fork() failed");
+		log_test_result(KSFT_FAIL);
 		goto close_comm_pipes;
 	} else if (!ret) {
 		switch (test) {
@@ -1229,7 +1338,8 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 		 */
 		ret = madvise(mem, size, MADV_DOFORK);
 		if (ret) {
-			ksft_test_result_fail("MADV_DOFORK failed\n");
+			ksft_perror("MADV_DOFORK failed");
+			log_test_result(KSFT_FAIL);
 			write(comm_pipes.parent_ready[1], "0", 1);
 			wait(&ret);
 			goto close_comm_pipes;
@@ -1239,8 +1349,8 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 		/* Collapse before anyone modified the COW-shared page. */
 		ret = madvise(mem, size, MADV_COLLAPSE);
 		if (ret) {
-			ksft_test_result_skip("MADV_COLLAPSE failed: %s\n",
-					      strerror(errno));
+			ksft_perror("MADV_COLLAPSE failed");
+			log_test_result(KSFT_SKIP);
 			write(comm_pipes.parent_ready[1], "0", 1);
 			wait(&ret);
 			goto close_comm_pipes;
@@ -1260,28 +1370,39 @@ static void do_test_anon_thp_collapse(char *mem, size_t size,
 	else
 		ret = -EINVAL;
 
-	ksft_test_result(!ret, "No leak from parent into child\n");
+	if (!ret)
+		log_test_result(KSFT_PASS);
+	else
+		log_test_result(KSFT_FAIL);
 close_comm_pipes:
 	close_comm_pipes(&comm_pipes);
 }
 
-static void test_anon_thp_collapse_unshared(char *mem, size_t size)
+static void test_anon_thp_collapse_unshared(char *mem, size_t size,
+		bool is_hugetlb)
 {
+	assert(!is_hugetlb);
 	do_test_anon_thp_collapse(mem, size, ANON_THP_COLLAPSE_UNSHARED);
 }
 
-static void test_anon_thp_collapse_fully_shared(char *mem, size_t size)
+static void test_anon_thp_collapse_fully_shared(char *mem, size_t size,
+		bool is_hugetlb)
 {
+	assert(!is_hugetlb);
 	do_test_anon_thp_collapse(mem, size, ANON_THP_COLLAPSE_FULLY_SHARED);
 }
 
-static void test_anon_thp_collapse_lower_shared(char *mem, size_t size)
+static void test_anon_thp_collapse_lower_shared(char *mem, size_t size,
+		bool is_hugetlb)
 {
+	assert(!is_hugetlb);
 	do_test_anon_thp_collapse(mem, size, ANON_THP_COLLAPSE_LOWER_SHARED);
 }
 
-static void test_anon_thp_collapse_upper_shared(char *mem, size_t size)
+static void test_anon_thp_collapse_upper_shared(char *mem, size_t size,
+		bool is_hugetlb)
 {
+	assert(!is_hugetlb);
 	do_test_anon_thp_collapse(mem, size, ANON_THP_COLLAPSE_UPPER_SHARED);
 }
 
@@ -1329,7 +1450,7 @@ static void run_anon_thp_test_cases(void)
 {
 	int i;
 
-	if (!thpsize)
+	if (!pmdsize)
 		return;
 
 	ksft_print_msg("[INFO] Anonymous THP tests\n");
@@ -1337,14 +1458,14 @@ static void run_anon_thp_test_cases(void)
 	for (i = 0; i < ARRAY_SIZE(anon_thp_test_cases); i++) {
 		struct test_case const *test_case = &anon_thp_test_cases[i];
 
-		ksft_print_msg("[RUN] %s\n", test_case->desc);
-		do_run_with_thp(test_case->fn, THP_RUN_PMD);
+		log_test_start("%s", test_case->desc);
+		do_run_with_thp(test_case->fn, THP_RUN_PMD, pmdsize);
 	}
 }
 
 static int tests_per_anon_thp_test_case(void)
 {
-	return thpsize ? 1 : 0;
+	return pmdsize ? 1 : 0;
 }
 
 typedef void (*non_anon_test_fn)(char *mem, const char *smem, size_t size);
@@ -1360,8 +1481,10 @@ static void test_cow(char *mem, const char *smem, size_t size)
 	memset(mem, 0xff, size);
 
 	/* See if we still read the old values via the other mapping. */
-	ksft_test_result(!memcmp(smem, old, size),
-			 "Other mapping not modified\n");
+	if (!memcmp(smem, old, size))
+		log_test_result(KSFT_PASS);
+	else
+		log_test_result(KSFT_FAIL);
 	free(old);
 }
 
@@ -1379,18 +1502,20 @@ static void run_with_zeropage(non_anon_test_fn fn, const char *desc)
 {
 	char *mem, *smem, tmp;
 
-	ksft_print_msg("[RUN] %s ... with shared zeropage\n", desc);
+	log_test_start("%s ... with shared zeropage", desc);
 
 	mem = mmap(NULL, pagesize, PROT_READ | PROT_WRITE,
 		   MAP_PRIVATE | MAP_ANON, -1, 0);
 	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	smem = mmap(NULL, pagesize, PROT_READ, MAP_PRIVATE | MAP_ANON, -1, 0);
-	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+	if (smem == MAP_FAILED) {
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
@@ -1411,36 +1536,45 @@ static void run_with_huge_zeropage(non_anon_test_fn fn, const char *desc)
 	size_t mmap_size;
 	int ret;
 
-	ksft_print_msg("[RUN] %s ... with huge zeropage\n", desc);
+	log_test_start("%s ... with huge zeropage", desc);
 
 	if (!has_huge_zeropage) {
-		ksft_test_result_skip("Huge zeropage not enabled\n");
+		ksft_print_msg("Huge zeropage not enabled\n");
+		log_test_result(KSFT_SKIP);
 		return;
 	}
 
 	/* For alignment purposes, we need twice the thp size. */
-	mmap_size = 2 * thpsize;
+	mmap_size = 2 * pmdsize;
 	mmap_mem = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (mmap_mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 	mmap_smem = mmap(NULL, mmap_size, PROT_READ,
 			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (mmap_smem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
 	/* We need a THP-aligned memory area. */
-	mem = (char *)(((uintptr_t)mmap_mem + thpsize) & ~(thpsize - 1));
-	smem = (char *)(((uintptr_t)mmap_smem + thpsize) & ~(thpsize - 1));
+	mem = (char *)(((uintptr_t)mmap_mem + pmdsize) & ~(pmdsize - 1));
+	smem = (char *)(((uintptr_t)mmap_smem + pmdsize) & ~(pmdsize - 1));
 
-	ret = madvise(mem, thpsize, MADV_HUGEPAGE);
-	ret |= madvise(smem, thpsize, MADV_HUGEPAGE);
-	if (ret) {
-		ksft_test_result_fail("MADV_HUGEPAGE failed\n");
+	ret = madvise(mem, pmdsize, MADV_HUGEPAGE);
+	if (ret != 0) {
+		ksft_perror("madvise()");
+		log_test_result(KSFT_FAIL);
+		goto munmap;
+	}
+	ret |= madvise(smem, pmdsize, MADV_HUGEPAGE);
+	if (ret != 0) {
+		ksft_perror("madvise()");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
@@ -1457,7 +1591,7 @@ static void run_with_huge_zeropage(non_anon_test_fn fn, const char *desc)
 		goto munmap;
 	}
 
-	fn(mem, smem, thpsize);
+	fn(mem, smem, pmdsize);
 munmap:
 	munmap(mmap_mem, mmap_size);
 	if (mmap_smem != MAP_FAILED)
@@ -1469,29 +1603,33 @@ static void run_with_memfd(non_anon_test_fn fn, const char *desc)
 	char *mem, *smem, tmp;
 	int fd;
 
-	ksft_print_msg("[RUN] %s ... with memfd\n", desc);
+	log_test_start("%s ... with memfd", desc);
 
 	fd = memfd_create("test", 0);
 	if (fd < 0) {
-		ksft_test_result_fail("memfd_create() failed\n");
+		ksft_perror("memfd_create() failed");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	/* File consists of a single page filled with zeroes. */
 	if (fallocate(fd, 0, 0, pagesize)) {
-		ksft_test_result_fail("fallocate() failed\n");
+		ksft_perror("fallocate() failed");
+		log_test_result(KSFT_FAIL);
 		goto close;
 	}
 
 	/* Create a private mapping of the memfd. */
 	mem = mmap(NULL, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto close;
 	}
 	smem = mmap(NULL, pagesize, PROT_READ, MAP_SHARED, fd, 0);
-	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+	if (smem == MAP_FAILED) {
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
@@ -1514,35 +1652,45 @@ static void run_with_tmpfile(non_anon_test_fn fn, const char *desc)
 	FILE *file;
 	int fd;
 
-	ksft_print_msg("[RUN] %s ... with tmpfile\n", desc);
+	log_test_start("%s ... with tmpfile", desc);
 
 	file = tmpfile();
 	if (!file) {
-		ksft_test_result_fail("tmpfile() failed\n");
+		ksft_perror("tmpfile() failed");
+		log_test_result(KSFT_FAIL);
 		return;
 	}
 
 	fd = fileno(file);
 	if (fd < 0) {
-		ksft_test_result_skip("fileno() failed\n");
+		ksft_perror("fileno() failed");
+		log_test_result(KSFT_SKIP);
 		return;
 	}
 
 	/* File consists of a single page filled with zeroes. */
 	if (fallocate(fd, 0, 0, pagesize)) {
-		ksft_test_result_fail("fallocate() failed\n");
+		if (errno == EOPNOTSUPP) {
+			ksft_print_msg("fallocate() not supported by filesystem\n");
+			log_test_result(KSFT_SKIP);
+		} else {
+			ksft_perror("fallocate() failed");
+			log_test_result(KSFT_FAIL);
+		}
 		goto close;
 	}
 
 	/* Create a private mapping of the memfd. */
 	mem = mmap(NULL, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto close;
 	}
 	smem = mmap(NULL, pagesize, PROT_READ, MAP_SHARED, fd, 0);
-	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+	if (smem == MAP_FAILED) {
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
@@ -1566,20 +1714,22 @@ static void run_with_memfd_hugetlb(non_anon_test_fn fn, const char *desc,
 	char *mem, *smem, tmp;
 	int fd;
 
-	ksft_print_msg("[RUN] %s ... with memfd hugetlb (%zu kB)\n", desc,
+	log_test_start("%s ... with memfd hugetlb (%zu kB)", desc,
 		       hugetlbsize / 1024);
 
 	flags |= __builtin_ctzll(hugetlbsize) << MFD_HUGE_SHIFT;
 
 	fd = memfd_create("test", flags);
 	if (fd < 0) {
-		ksft_test_result_skip("memfd_create() failed\n");
+		ksft_perror("memfd_create() failed");
+		log_test_result(KSFT_SKIP);
 		return;
 	}
 
 	/* File consists of a single page filled with zeroes. */
 	if (fallocate(fd, 0, 0, hugetlbsize)) {
-		ksft_test_result_skip("need more free huge pages\n");
+		ksft_perror("need more free huge pages");
+		log_test_result(KSFT_SKIP);
 		goto close;
 	}
 
@@ -1587,12 +1737,14 @@ static void run_with_memfd_hugetlb(non_anon_test_fn fn, const char *desc,
 	mem = mmap(NULL, hugetlbsize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd,
 		   0);
 	if (mem == MAP_FAILED) {
-		ksft_test_result_skip("need more free huge pages\n");
+		ksft_perror("need more free huge pages");
+		log_test_result(KSFT_SKIP);
 		goto close;
 	}
 	smem = mmap(NULL, hugetlbsize, PROT_READ, MAP_SHARED, fd, 0);
-	if (mem == MAP_FAILED) {
-		ksft_test_result_fail("mmap() failed\n");
+	if (smem == MAP_FAILED) {
+		ksft_perror("mmap() failed");
+		log_test_result(KSFT_FAIL);
 		goto munmap;
 	}
 
@@ -1603,7 +1755,7 @@ static void run_with_memfd_hugetlb(non_anon_test_fn fn, const char *desc,
 	fn(mem, smem, hugetlbsize);
 munmap:
 	munmap(mem, hugetlbsize);
-	if (mem != MAP_FAILED)
+	if (smem != MAP_FAILED)
 		munmap(smem, hugetlbsize);
 close:
 	close(fd);
@@ -1650,7 +1802,7 @@ static void run_non_anon_test_case(struct non_anon_test_case const *test_case)
 	run_with_zeropage(test_case->fn, test_case->desc);
 	run_with_memfd(test_case->fn, test_case->desc);
 	run_with_tmpfile(test_case->fn, test_case->desc);
-	if (thpsize)
+	if (pmdsize)
 		run_with_huge_zeropage(test_case->fn, test_case->desc);
 	for (i = 0; i < nr_hugetlbsizes; i++)
 		run_with_memfd_hugetlb(test_case->fn, test_case->desc,
@@ -1671,7 +1823,7 @@ static int tests_per_non_anon_test_case(void)
 {
 	int tests = 3 + nr_hugetlbsizes;
 
-	if (thpsize)
+	if (pmdsize)
 		tests += 1;
 	return tests;
 }
@@ -1683,10 +1835,13 @@ int main(int argc, char **argv)
 	ksft_print_header();
 
 	pagesize = getpagesize();
-	thpsize = read_pmd_pagesize();
-	if (thpsize)
+	pmdsize = read_pmd_pagesize();
+	if (pmdsize) {
+		ksft_print_msg("[INFO] detected PMD size: %zu KiB\n",
+			       pmdsize / 1024);
 		ksft_print_msg("[INFO] detected THP size: %zu KiB\n",
-			       thpsize / 1024);
+			       pmdsize / 1024);
+	}
 	nr_hugetlbsizes = detect_hugetlb_page_sizes(hugetlbsizes,
 						    ARRAY_SIZE(hugetlbsizes));
 	detect_huge_zeropage();

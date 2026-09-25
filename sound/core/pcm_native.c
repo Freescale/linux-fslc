@@ -1430,6 +1430,8 @@ static int snd_pcm_pre_start(struct snd_pcm_substream *substream,
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	if (runtime->state != SNDRV_PCM_STATE_PREPARED)
 		return -EBADFD;
+	if (atomic_read(&runtime->buffer_accessing) < 0)
+		return -EBADFD; /* during hw_params, hw_free or prepare */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
 	    !snd_pcm_playback_data(substream))
 		return -EPIPE;
@@ -2354,6 +2356,7 @@ static void relink_to_local(struct snd_pcm_substream *substream)
 
 static int snd_pcm_unlink(struct snd_pcm_substream *substream)
 {
+	struct snd_pcm_substream *s;
 	struct snd_pcm_group *group;
 	bool nonatomic = substream->pcm->nonatomic;
 	bool do_free = false;
@@ -2368,6 +2371,12 @@ static int snd_pcm_unlink(struct snd_pcm_substream *substream)
 
 	group = substream->group;
 	snd_pcm_group_lock_irq(group, nonatomic);
+
+	/* release drain waiters before changing membership, else snd_pcm_drain()
+	 * leaves its on-stack wait entry queued on a member's sleep list
+	 */
+	snd_pcm_group_for_each_entry(s, substream)
+		wake_up(&s->runtime->sleep);
 
 	relink_to_local(substream);
 	refcount_dec(&group->refs);

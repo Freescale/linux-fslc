@@ -655,6 +655,11 @@ static void nft_map_catchall_deactivate(const struct nft_ctx *ctx,
 	}
 }
 
+/* Use NFT_ITER_UPDATE iterator even if this may be called from the preparation
+ * phase, the set clone might already exist from a previous command, or it might
+ * be a set that is going away and does not require a clone. The netns and
+ * netlink release paths also need to work on the live set.
+ */
 static void nft_map_deactivate(const struct nft_ctx *ctx, struct nft_set *set)
 {
 	struct nft_set_iter iter = {
@@ -753,58 +758,6 @@ static int nft_delflowtable(struct nft_ctx *ctx,
 
 	return 0;
 }
-
-static void __nft_reg_track_clobber(struct nft_regs_track *track, u8 dreg)
-{
-	int i;
-
-	for (i = track->regs[dreg].num_reg; i > 0; i--)
-		__nft_reg_track_cancel(track, dreg - i);
-}
-
-static void __nft_reg_track_update(struct nft_regs_track *track,
-				   const struct nft_expr *expr,
-				   u8 dreg, u8 num_reg)
-{
-	track->regs[dreg].selector = expr;
-	track->regs[dreg].bitwise = NULL;
-	track->regs[dreg].num_reg = num_reg;
-}
-
-void nft_reg_track_update(struct nft_regs_track *track,
-			  const struct nft_expr *expr, u8 dreg, u8 len)
-{
-	unsigned int regcount;
-	int i;
-
-	__nft_reg_track_clobber(track, dreg);
-
-	regcount = DIV_ROUND_UP(len, NFT_REG32_SIZE);
-	for (i = 0; i < regcount; i++, dreg++)
-		__nft_reg_track_update(track, expr, dreg, i);
-}
-EXPORT_SYMBOL_GPL(nft_reg_track_update);
-
-void nft_reg_track_cancel(struct nft_regs_track *track, u8 dreg, u8 len)
-{
-	unsigned int regcount;
-	int i;
-
-	__nft_reg_track_clobber(track, dreg);
-
-	regcount = DIV_ROUND_UP(len, NFT_REG32_SIZE);
-	for (i = 0; i < regcount; i++, dreg++)
-		__nft_reg_track_cancel(track, dreg);
-}
-EXPORT_SYMBOL_GPL(nft_reg_track_cancel);
-
-void __nft_reg_track_cancel(struct nft_regs_track *track, u8 dreg)
-{
-	track->regs[dreg].selector = NULL;
-	track->regs[dreg].bitwise = NULL;
-	track->regs[dreg].num_reg = 0;
-}
-EXPORT_SYMBOL_GPL(__nft_reg_track_cancel);
 
 /*
  * Tables
@@ -7448,9 +7401,12 @@ static int nft_set_catchall_flush(const struct nft_ctx *ctx,
 
 static int nft_set_flush(struct nft_ctx *ctx, struct nft_set *set, u8 genmask)
 {
+	/* The set backend might need to clone the set, do it now from the
+	 * preparation phase, use NFT_ITER_UPDATE_CLONE iterator type.
+	 */
 	struct nft_set_iter iter = {
 		.genmask	= genmask,
-		.type		= NFT_ITER_UPDATE,
+		.type		= NFT_ITER_UPDATE_CLONE,
 		.fn		= nft_setelem_flush,
 	};
 
@@ -9638,16 +9594,9 @@ void nf_tables_trans_destroy_flush_work(void)
 }
 EXPORT_SYMBOL_GPL(nf_tables_trans_destroy_flush_work);
 
-static bool nft_expr_reduce(struct nft_regs_track *track,
-			    const struct nft_expr *expr)
-{
-	return false;
-}
-
 static int nf_tables_commit_chain_prepare(struct net *net, struct nft_chain *chain)
 {
 	const struct nft_expr *expr, *last;
-	struct nft_regs_track track = {};
 	unsigned int size, data_size;
 	void *data, *data_boundary;
 	struct nft_rule_dp *prule;
@@ -9684,15 +9633,7 @@ static int nf_tables_commit_chain_prepare(struct net *net, struct nft_chain *cha
 			return -ENOMEM;
 
 		size = 0;
-		track.last = nft_expr_last(rule);
 		nft_rule_for_each_expr(expr, last, rule) {
-			track.cur = expr;
-
-			if (nft_expr_reduce(&track, expr)) {
-				expr = track.cur;
-				continue;
-			}
-
 			if (WARN_ON_ONCE(data + size + expr->ops->size > data_boundary))
 				return -ENOMEM;
 
@@ -10273,10 +10214,6 @@ static int nf_tables_commit(struct net *net, struct sk_buff *skb)
 		return -EAGAIN;
 	}
 
-	err = nft_flow_rule_offload_commit(net);
-	if (err < 0)
-		return err;
-
 	/* 1.  Allocate space for next generation rules_gen_X[] */
 	list_for_each_entry_safe(trans, next, &nft_net->commit_list, list) {
 		int ret;
@@ -10298,6 +10235,16 @@ static int nf_tables_commit(struct net *net, struct sk_buff *skb)
 				return ret;
 			}
 		}
+	}
+
+	/* must be last, so audit and chain blob set up does not leave hardware
+	 * in consistent state.
+	 */
+	err = nft_flow_rule_offload_commit(net);
+	if (err < 0) {
+		nf_tables_commit_chain_prepare_cancel(net);
+		nf_tables_commit_audit_free(&adl);
+		return err;
 	}
 
 	/* step 2.  Make rules_gen_X visible to packet path */

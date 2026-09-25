@@ -611,14 +611,18 @@ static int adv_timeout_expire_sync(struct hci_dev *hdev, void *data)
 {
 	u8 instance = *(u8 *)data;
 
-	kfree(data);
-
 	hci_clear_adv_instance_sync(hdev, NULL, instance, false);
 
 	if (list_empty(&hdev->adv_instances))
 		return hci_disable_advertising_sync(hdev);
 
 	return 0;
+}
+
+static void adv_timeout_expire_destroy(struct hci_dev *hdev, void *data,
+				       int err)
+{
+	kfree(data);
 }
 
 static void adv_timeout_expire(struct work_struct *work)
@@ -641,7 +645,9 @@ static void adv_timeout_expire(struct work_struct *work)
 		goto unlock;
 
 	*inst_ptr = hdev->cur_adv_instance;
-	hci_cmd_sync_queue(hdev, adv_timeout_expire_sync, inst_ptr, NULL);
+	if (hci_cmd_sync_queue(hdev, adv_timeout_expire_sync, inst_ptr,
+			       adv_timeout_expire_destroy) < 0)
+		kfree(inst_ptr);
 
 unlock:
 	hci_dev_unlock(hdev);
@@ -849,7 +855,7 @@ int hci_cmd_sync_run_once(struct hci_dev *hdev, hci_cmd_sync_work_func_t func,
 			  void *data, hci_cmd_sync_work_destroy_t destroy)
 {
 	if (hci_cmd_sync_lookup_entry(hdev, func, data, destroy))
-		return 0;
+		return -EEXIST;
 
 	return hci_cmd_sync_run(hdev, func, data, destroy);
 }
@@ -953,12 +959,16 @@ int hci_update_eir_sync(struct hci_dev *hdev)
 
 	memset(&cp, 0, sizeof(cp));
 
+	hci_dev_lock(hdev);
 	eir_create(hdev, cp.data);
 
-	if (memcmp(cp.data, hdev->eir, sizeof(cp.data)) == 0)
+	if (memcmp(cp.data, hdev->eir, sizeof(cp.data)) == 0) {
+		hci_dev_unlock(hdev);
 		return 0;
+	}
 
 	memcpy(hdev->eir, cp.data, sizeof(cp.data));
+	hci_dev_unlock(hdev);
 
 	return __hci_cmd_sync_status(hdev, HCI_OP_WRITE_EIR, sizeof(cp), &cp,
 				     HCI_CMD_TIMEOUT);
@@ -990,6 +1000,7 @@ int hci_update_class_sync(struct hci_dev *hdev)
 	if (hci_dev_test_flag(hdev, HCI_SERVICE_CACHE))
 		return 0;
 
+	hci_dev_lock(hdev);
 	cod[0] = hdev->minor_class;
 	cod[1] = hdev->major_class;
 	cod[2] = get_service_classes(hdev);
@@ -997,8 +1008,12 @@ int hci_update_class_sync(struct hci_dev *hdev)
 	if (hci_dev_test_flag(hdev, HCI_LIMITED_DISCOVERABLE))
 		cod[1] |= 0x20;
 
-	if (memcmp(cod, hdev->dev_class, 3) == 0)
+	if (memcmp(cod, hdev->dev_class, 3) == 0) {
+		hci_dev_unlock(hdev);
 		return 0;
+	}
+
+	hci_dev_unlock(hdev);
 
 	return __hci_cmd_sync_status(hdev, HCI_OP_WRITE_CLASS_OF_DEV,
 				     sizeof(cod), cod, HCI_CMD_TIMEOUT);
@@ -1244,10 +1259,11 @@ static int hci_set_adv_set_random_addr_sync(struct hci_dev *hdev, u8 instance,
 }
 
 static int
-hci_set_ext_adv_params_sync(struct hci_dev *hdev, struct adv_info *adv,
+hci_set_ext_adv_params_sync(struct hci_dev *hdev, u8 instance,
 			    const struct hci_cp_le_set_ext_adv_params *cp,
 			    struct hci_rp_le_set_ext_adv_params *rp)
 {
+	struct adv_info *adv;
 	struct sk_buff *skb;
 
 	skb = __hci_cmd_sync(hdev, HCI_OP_LE_SET_EXT_ADV_PARAMS, sizeof(*cp),
@@ -1275,11 +1291,15 @@ hci_set_ext_adv_params_sync(struct hci_dev *hdev, struct adv_info *adv,
 
 	if (!rp->status) {
 		hdev->adv_addr_type = cp->own_addr_type;
-		if (!cp->handle) {
+		if (!instance) {
 			/* Store in hdev for instance 0 */
 			hdev->adv_tx_power = rp->tx_power;
-		} else if (adv) {
-			adv->tx_power = rp->tx_power;
+		} else {
+			hci_dev_lock(hdev);
+			adv = hci_find_adv_instance(hdev, instance);
+			if (adv)
+				adv->tx_power = rp->tx_power;
+			hci_dev_unlock(hdev);
 		}
 	}
 
@@ -1299,9 +1319,13 @@ static int hci_set_ext_adv_data_sync(struct hci_dev *hdev, u8 instance)
 	memset(&pdu, 0, sizeof(pdu));
 
 	if (instance) {
+		hci_dev_lock(hdev);
+
 		adv = hci_find_adv_instance(hdev, instance);
-		if (!adv || !adv->adv_data_changed)
+		if (!adv || !adv->adv_data_changed) {
+			hci_dev_unlock(hdev);
 			return 0;
+		}
 	}
 
 	len = eir_create_adv_data(hdev, instance, pdu.data);
@@ -1311,16 +1335,27 @@ static int hci_set_ext_adv_data_sync(struct hci_dev *hdev, u8 instance)
 	pdu.cp.operation = LE_SET_ADV_DATA_OP_COMPLETE;
 	pdu.cp.frag_pref = LE_SET_ADV_DATA_NO_FRAG;
 
+	if (adv) {
+		adv->adv_data_changed = false;
+		hci_dev_unlock(hdev);
+	}
+
 	err = __hci_cmd_sync_status(hdev, HCI_OP_LE_SET_EXT_ADV_DATA,
 				    sizeof(pdu.cp) + len, &pdu.cp,
 				    HCI_CMD_TIMEOUT);
-	if (err)
-		return err;
+	if (err) {
+		if (instance) {
+			hci_dev_lock(hdev);
+			adv = hci_find_adv_instance(hdev, instance);
+			if (adv)
+				adv->adv_data_changed = true;
+			hci_dev_unlock(hdev);
+		}
 
-	/* Update data if the command succeed */
-	if (adv) {
-		adv->adv_data_changed = false;
-	} else {
+		return err;
+	}
+
+	if (!instance) {
 		memcpy(hdev->adv_data, pdu.data, len);
 		hdev->adv_data_len = len;
 	}
@@ -1374,22 +1409,22 @@ int hci_setup_ext_adv_instance_sync(struct hci_dev *hdev, u8 instance)
 	struct adv_info *adv;
 	bool secondary_adv;
 
-	if (instance > 0) {
-		adv = hci_find_adv_instance(hdev, instance);
-		if (!adv)
-			return -EINVAL;
-	} else {
-		adv = NULL;
-	}
-
 	/* Updating parameters of an active instance will return a
-	 * Command Disallowed error, so we must first disable the
-	 * instance if it is active.
+	 * Command Disallowed error, so disable it before taking a snapshot.
 	 */
-	if (adv) {
+	if (instance > 0) {
 		err = hci_disable_ext_adv_instance_sync(hdev, instance);
 		if (err)
 			return err;
+
+		hci_dev_lock(hdev);
+		adv = hci_find_adv_instance(hdev, instance);
+		if (!adv) {
+			hci_dev_unlock(hdev);
+			return -EINVAL;
+		}
+	} else {
+		adv = NULL;
 	}
 
 	flags = hci_adv_instance_flags(hdev, instance);
@@ -1400,8 +1435,11 @@ int hci_setup_ext_adv_instance_sync(struct hci_dev *hdev, u8 instance)
 	connectable = (flags & MGMT_ADV_FLAG_CONNECTABLE) ||
 		      mgmt_get_connectable(hdev);
 
-	if (!is_advertising_allowed(hdev, connectable))
+	if (!is_advertising_allowed(hdev, connectable)) {
+		if (instance)
+			hci_dev_unlock(hdev);
 		return -EPERM;
+	}
 
 	/* Set require_privacy to true only when non-connectable
 	 * advertising is used and it is not periodic.
@@ -1412,8 +1450,11 @@ int hci_setup_ext_adv_instance_sync(struct hci_dev *hdev, u8 instance)
 	err = hci_get_random_address(hdev, require_privacy,
 				     adv_use_rpa(hdev, flags), adv,
 				     &own_addr_type, &random_addr);
-	if (err < 0)
+	if (err < 0) {
+		if (instance)
+			hci_dev_unlock(hdev);
 		return err;
+	}
 
 	memset(&cp, 0, sizeof(cp));
 
@@ -1462,6 +1503,9 @@ int hci_setup_ext_adv_instance_sync(struct hci_dev *hdev, u8 instance)
 	cp.channel_map = hdev->le_adv_channel_map;
 	cp.handle = instance;
 
+	if (instance)
+		hci_dev_unlock(hdev);
+
 	if (flags & MGMT_ADV_FLAG_SEC_2M) {
 		cp.primary_phy = HCI_ADV_PHY_1M;
 		cp.secondary_phy = HCI_ADV_PHY_2M;
@@ -1474,12 +1518,12 @@ int hci_setup_ext_adv_instance_sync(struct hci_dev *hdev, u8 instance)
 		cp.secondary_phy = HCI_ADV_PHY_1M;
 	}
 
-	err = hci_set_ext_adv_params_sync(hdev, adv, &cp, &rp);
+	err = hci_set_ext_adv_params_sync(hdev, instance, &cp, &rp);
 	if (err)
 		return err;
 
 	/* Update adv data as tx power is known now */
-	err = hci_set_ext_adv_data_sync(hdev, cp.handle);
+	err = hci_set_ext_adv_data_sync(hdev, instance);
 	if (err)
 		return err;
 
@@ -1487,9 +1531,14 @@ int hci_setup_ext_adv_instance_sync(struct hci_dev *hdev, u8 instance)
 	     own_addr_type == ADDR_LE_DEV_RANDOM_RESOLVED) &&
 	    bacmp(&random_addr, BDADDR_ANY)) {
 		/* Check if random address need to be updated */
-		if (adv) {
-			if (!bacmp(&random_addr, &adv->random_addr))
+		if (instance) {
+			hci_dev_lock(hdev);
+			adv = hci_find_adv_instance(hdev, instance);
+			if (!adv || !bacmp(&random_addr, &adv->random_addr)) {
+				hci_dev_unlock(hdev);
 				return 0;
+			}
+			hci_dev_unlock(hdev);
 		} else {
 			if (!bacmp(&random_addr, &hdev->random_addr))
 				return 0;
@@ -1515,9 +1564,13 @@ static int hci_set_ext_scan_rsp_data_sync(struct hci_dev *hdev, u8 instance)
 	memset(&pdu, 0, sizeof(pdu));
 
 	if (instance) {
+		hci_dev_lock(hdev);
+
 		adv = hci_find_adv_instance(hdev, instance);
-		if (!adv || !adv->scan_rsp_changed)
+		if (!adv || !adv->scan_rsp_changed) {
+			hci_dev_unlock(hdev);
 			return 0;
+		}
 	}
 
 	len = eir_create_scan_rsp(hdev, instance, pdu.data);
@@ -1527,15 +1580,27 @@ static int hci_set_ext_scan_rsp_data_sync(struct hci_dev *hdev, u8 instance)
 	pdu.cp.operation = LE_SET_ADV_DATA_OP_COMPLETE;
 	pdu.cp.frag_pref = LE_SET_ADV_DATA_NO_FRAG;
 
+	if (adv) {
+		adv->scan_rsp_changed = false;
+		hci_dev_unlock(hdev);
+	}
+
 	err = __hci_cmd_sync_status(hdev, HCI_OP_LE_SET_EXT_SCAN_RSP_DATA,
 				    sizeof(pdu.cp) + len, &pdu.cp,
 				    HCI_CMD_TIMEOUT);
-	if (err)
-		return err;
+	if (err) {
+		if (instance) {
+			hci_dev_lock(hdev);
+			adv = hci_find_adv_instance(hdev, instance);
+			if (adv)
+				adv->scan_rsp_changed = true;
+			hci_dev_unlock(hdev);
+		}
 
-	if (adv) {
-		adv->scan_rsp_changed = false;
-	} else {
+		return err;
+	}
+
+	if (!instance) {
 		memcpy(hdev->scan_rsp_data, pdu.data, len);
 		hdev->scan_rsp_data_len = len;
 	}
@@ -1550,7 +1615,13 @@ static int __hci_set_scan_rsp_data_sync(struct hci_dev *hdev, u8 instance)
 
 	memset(&cp, 0, sizeof(cp));
 
+	if (instance)
+		hci_dev_lock(hdev);
+
 	len = eir_create_scan_rsp(hdev, instance, cp.data);
+
+	if (instance)
+		hci_dev_unlock(hdev);
 
 	if (hdev->scan_rsp_data_len == len &&
 	    !memcmp(cp.data, hdev->scan_rsp_data, len))
@@ -1685,14 +1756,18 @@ static int hci_set_per_adv_data_sync(struct hci_dev *hdev, u8 instance)
 		u8 data[HCI_MAX_PER_AD_LENGTH];
 	} pdu;
 	u8 len;
+	struct adv_info *adv = NULL;
 
 	memset(&pdu, 0, sizeof(pdu));
 
 	if (instance) {
-		struct adv_info *adv = hci_find_adv_instance(hdev, instance);
+		hci_dev_lock(hdev);
 
-		if (!adv || !adv->periodic)
+		adv = hci_find_adv_instance(hdev, instance);
+		if (!adv || !adv->periodic) {
+			hci_dev_unlock(hdev);
 			return 0;
+		}
 	}
 
 	len = eir_create_per_adv_data(hdev, instance, pdu.data);
@@ -1700,6 +1775,9 @@ static int hci_set_per_adv_data_sync(struct hci_dev *hdev, u8 instance)
 	pdu.cp.length = len;
 	pdu.cp.handle = instance;
 	pdu.cp.operation = LE_SET_ADV_DATA_OP_COMPLETE;
+
+	if (adv)
+		hci_dev_unlock(hdev);
 
 	return __hci_cmd_sync_status(hdev, HCI_OP_LE_SET_PER_ADV_DATA,
 				     sizeof(pdu.cp) + len, &pdu,
@@ -5202,6 +5280,7 @@ int hci_dev_open_sync(struct hci_dev *hdev)
 		if (hdev->req_skb) {
 			kfree_skb(hdev->req_skb);
 			hdev->req_skb = NULL;
+			hci_dev_clear_flag(hdev, HCI_CMD_PENDING);
 		}
 
 		clear_bit(HCI_RUNNING, &hdev->flags);
@@ -5370,6 +5449,7 @@ int hci_dev_close_sync(struct hci_dev *hdev)
 	if (hdev->req_skb) {
 		kfree_skb(hdev->req_skb);
 		hdev->req_skb = NULL;
+		hci_dev_clear_flag(hdev, HCI_CMD_PENDING);
 	}
 
 	clear_bit(HCI_RUNNING, &hdev->flags);
@@ -6132,6 +6212,8 @@ static int hci_pause_discovery_sync(struct hci_dev *hdev)
 static int hci_update_event_filter_sync(struct hci_dev *hdev)
 {
 	struct bdaddr_list_with_flags *b;
+	bdaddr_t *accept_list;
+	size_t i, num_entries = 0;
 	u8 scan = SCAN_DISABLED;
 	bool scanning = test_bit(HCI_PSCAN, &hdev->flags);
 	int err;
@@ -6148,23 +6230,49 @@ static int hci_update_event_filter_sync(struct hci_dev *hdev)
 	/* Always clear event filter when starting */
 	hci_clear_event_filter_sync(hdev);
 
-	list_for_each_entry(b, &hdev->accept_list, list) {
-		if (!(b->flags & HCI_CONN_FLAG_REMOTE_WAKEUP))
-			continue;
+	hci_dev_lock(hdev);
 
-		bt_dev_dbg(hdev, "Adding event filters for %pMR", &b->bdaddr);
+	list_for_each_entry(b, &hdev->accept_list, list)
+		if (b->flags & HCI_CONN_FLAG_REMOTE_WAKEUP)
+			num_entries++;
 
-		err =  hci_set_event_filter_sync(hdev, HCI_FLT_CONN_SETUP,
-						 HCI_CONN_SETUP_ALLOW_BDADDR,
-						 &b->bdaddr,
-						 HCI_CONN_SETUP_AUTO_ON);
+	if (!num_entries) {
+		hci_dev_unlock(hdev);
+		goto update_scan;
+	}
+
+	accept_list = kmalloc_array(num_entries, sizeof(*accept_list),
+				    GFP_KERNEL);
+	if (!accept_list) {
+		hci_dev_unlock(hdev);
+		return -ENOMEM;
+	}
+
+	i = 0;
+	list_for_each_entry(b, &hdev->accept_list, list)
+		if (b->flags & HCI_CONN_FLAG_REMOTE_WAKEUP)
+			bacpy(&accept_list[i++], &b->bdaddr);
+
+	hci_dev_unlock(hdev);
+
+	for (i = 0; i < num_entries; i++) {
+		bt_dev_dbg(hdev, "Adding event filters for %pMR",
+			   &accept_list[i]);
+
+		err = hci_set_event_filter_sync(hdev, HCI_FLT_CONN_SETUP,
+						HCI_CONN_SETUP_ALLOW_BDADDR,
+					 &accept_list[i],
+					 HCI_CONN_SETUP_AUTO_ON);
 		if (err)
-			bt_dev_dbg(hdev, "Failed to set event filter for %pMR",
-				   &b->bdaddr);
+			bt_dev_err(hdev, "Failed to set event filter for %pMR",
+				   &accept_list[i]);
 		else
 			scan = SCAN_PAGE;
 	}
 
+	kfree(accept_list);
+
+update_scan:
 	if (scan && !scanning)
 		hci_write_scan_enable_sync(hdev, scan);
 	else if (!scan && scanning)
@@ -6405,7 +6513,7 @@ static int hci_le_ext_directed_advertising_sync(struct hci_dev *hdev,
 	if (err)
 		return err;
 
-	err = hci_set_ext_adv_params_sync(hdev, NULL, &cp, &rp);
+	err = hci_set_ext_adv_params_sync(hdev, 0, &cp, &rp);
 	if (err)
 		return err;
 
@@ -6573,7 +6681,9 @@ static int hci_le_create_conn_sync(struct hci_dev *hdev, void *data)
 		if (hci_dev_test_flag(hdev, HCI_LE_SCAN) &&
 		    hdev->le_scan_type == LE_SCAN_ACTIVE &&
 		    !hci_dev_test_flag(hdev, HCI_LE_SIMULTANEOUS_ROLES)) {
-			hci_conn_del(conn);
+			conn->state = BT_OPEN;
+			hci_abort_conn_sync(hdev, conn,
+					    HCI_ERROR_REJ_LIMITED_RESOURCES);
 			hci_conn_put(conn);
 			return -EBUSY;
 		}

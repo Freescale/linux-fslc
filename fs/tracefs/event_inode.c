@@ -511,6 +511,8 @@ static inline struct eventfs_inode *init_ei(struct eventfs_inode *ei, const char
 	if (!ei->name)
 		return NULL;
 	kref_init(&ei->kref);
+	INIT_LIST_HEAD(&ei->children);
+	INIT_LIST_HEAD(&ei->list);
 	return ei;
 }
 
@@ -797,8 +799,6 @@ struct eventfs_inode *eventfs_create_dir(const char *name, struct eventfs_inode 
 	ei->entries = entries;
 	ei->nr_entries = size;
 	ei->data = data;
-	INIT_LIST_HEAD(&ei->children);
-	INIT_LIST_HEAD(&ei->list);
 
 	mutex_lock(&eventfs_mutex);
 	if (!parent->is_freed)
@@ -874,9 +874,6 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 	 */
 	ei->attr.mode |= EVENTFS_SAVE_UID | EVENTFS_SAVE_GID;
 
-	INIT_LIST_HEAD(&ei->children);
-	INIT_LIST_HEAD(&ei->list);
-
 	ti = get_tracefs(inode);
 	ti->flags |= TRACEFS_EVENT_INODE;
 	ti->private = ei;
@@ -922,7 +919,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
  */
 static void eventfs_remove_rec(struct eventfs_inode *ei, int level)
 {
-	struct eventfs_inode *ei_child;
+	struct eventfs_inode *ei_child, *tmp;
 
 	/*
 	 * Check recursion depth. It should never be greater than 3:
@@ -935,7 +932,7 @@ static void eventfs_remove_rec(struct eventfs_inode *ei, int level)
 		return;
 
 	/* search for nested folders or files */
-	list_for_each_entry(ei_child, &ei->children, list)
+	list_for_each_entry_safe(ei_child, tmp, &ei->children, list)
 		eventfs_remove_rec(ei_child, level + 1);
 
 	list_del_rcu(&ei->list);

@@ -388,7 +388,6 @@ static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 
 err_call_unbind:
 	v4l2_async_nf_call_unbind(notifier, sd, asc);
-	list_del(&asc->asc_subdev_entry);
 
 err_unregister_subdev:
 	if (registered)
@@ -798,7 +797,7 @@ v4l2_async_connection_unique(struct v4l2_subdev *sd)
 }
 EXPORT_SYMBOL_GPL(v4l2_async_connection_unique);
 
-int v4l2_async_register_subdev(struct v4l2_subdev *sd)
+int __v4l2_async_register_subdev(struct v4l2_subdev *sd, struct module *module)
 {
 	struct v4l2_async_notifier *subdev_notifier;
 	struct v4l2_async_notifier *notifier;
@@ -821,6 +820,8 @@ int v4l2_async_register_subdev(struct v4l2_subdev *sd)
 		dev_warn(sd->dev, "sub-device fwnode is an endpoint!\n");
 		return -EINVAL;
 	}
+
+	sd->owner = module;
 
 	mutex_lock(&list_lock);
 
@@ -869,9 +870,11 @@ err_unbind_one:
 err_unlock:
 	mutex_unlock(&list_lock);
 
+	sd->owner = NULL;
+
 	return ret;
 }
-EXPORT_SYMBOL(v4l2_async_register_subdev);
+EXPORT_SYMBOL(__v4l2_async_register_subdev);
 
 void v4l2_async_unregister_subdev(struct v4l2_subdev *sd)
 {
@@ -890,12 +893,18 @@ void v4l2_async_unregister_subdev(struct v4l2_subdev *sd)
 	sd->subdev_notifier = NULL;
 
 	if (sd->asc_list.next) {
-		list_for_each_entry_safe(asc, asc_tmp, &sd->asc_list,
-					 asc_subdev_entry) {
-			list_move(&asc->asc_entry,
-				  &asc->notifier->waiting_list);
-
-			v4l2_async_unbind_subdev_one(asc->notifier, asc);
+		if (list_empty(&sd->asc_list)) {
+			/*
+			 * If the sub-device was registered through other means
+			 * than v4l2-async, there are no async connections but
+			 * the sub-device may still well be registered.
+			 * Unregister it now.
+			 */
+			v4l2_device_unregister_subdev(sd);
+		} else {
+			list_for_each_entry_safe(asc, asc_tmp, &sd->asc_list,
+						 asc_subdev_entry)
+				v4l2_async_unbind_subdev_one(asc->notifier, asc);
 		}
 	}
 
