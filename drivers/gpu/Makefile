@@ -6,7 +6,6 @@
 obj-$(CONFIG_GPU_BUDDY)	+= buddy.o
 obj-y			+= arm/
 obj-y			+= host1x/ drm/ vga/ tests/
-obj-$(CONFIG_IMX_IPUV3_CORE)	+= ipu-v3/
 obj-y			+= imx/
 obj-$(CONFIG_TRACE_GPU_MEM)		+= trace/
 obj-$(CONFIG_NOVA_CORE)		+= nova-core/
