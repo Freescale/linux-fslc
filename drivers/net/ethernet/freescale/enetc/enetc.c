@@ -2770,7 +2770,8 @@ static void enetc_xsk_descs_to_tx_ring(struct enetc_bdr *tx_ring,
 			first_txbd = txbd;
 			frm_len = tx_swbd->len;
 
-			meta = xsk_buff_get_metadata(pool, xsk_descs[j].addr);
+			meta = xsk_buff_get_metadata(pool, xsk_descs[j].addr,
+									     xsk_descs[j].options);
 			if (!meta)
 				goto no_metadata_req;
 
