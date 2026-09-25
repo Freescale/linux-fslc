@@ -7,6 +7,7 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
@@ -67,6 +68,11 @@ struct imx93_blk_ctrl_qos {
 	u32 cfg_off;
 	u32 default_prio;
 	u32 cfg_prio;
+};
+
+struct imx93_blk_ctrl_subdomain_link {
+	struct generic_pm_domain *parent;
+	struct generic_pm_domain *subdomain;
 };
 
 struct imx93_blk_ctrl_domain_data {
@@ -191,6 +197,32 @@ static int imx93_blk_ctrl_power_off(struct generic_pm_domain *genpd)
 	return 0;
 }
 
+static void imx93_release_genpd_provider(void *data)
+{
+	struct device_node *of_node = data;
+
+	of_genpd_del_provider(of_node);
+}
+
+static void imx93_release_pm_genpd(void *data)
+{
+	struct generic_pm_domain *genpd = data;
+
+	pm_genpd_remove(genpd);
+}
+
+static void imx93_release_subdomain(void *data)
+{
+	struct imx93_blk_ctrl_subdomain_link *link = data;
+
+	pm_genpd_remove_subdomain(link->parent, link->subdomain);
+}
+
+static void imx93_release_regmap(void *data)
+{
+	regmap_exit(data);
+}
+
 static struct lock_class_key blk_ctrl_genpd_lock_class;
 
 static int imx93_blk_ctrl_probe(struct platform_device *pdev)
@@ -225,22 +257,22 @@ static int imx93_blk_ctrl_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(bc->regmap),
 				     "failed to init regmap\n");
 
+	ret = devm_add_action_or_reset(dev, imx93_release_regmap, bc->regmap);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to add regmap release callback\n");
+
 	bc->domains = devm_kcalloc(dev, bc_data->num_domains,
 				   sizeof(struct imx93_blk_ctrl_domain),
 				   GFP_KERNEL);
-	if (!bc->domains) {
-		ret = -ENOMEM;
-		goto free_regmap;
-	}
+	if (!bc->domains)
+		return -ENOMEM;
 
 	bc->onecell_data.num_domains = bc_data->num_domains;
 	bc->onecell_data.domains =
 		devm_kcalloc(dev, bc_data->num_domains,
 			     sizeof(struct generic_pm_domain *), GFP_KERNEL);
-	if (!bc->onecell_data.domains) {
-		ret = -ENOMEM;
-		goto free_regmap;
-	}
+	if (!bc->onecell_data.domains)
+		return -ENOMEM;
 
 	for (i = 0; i < bc_data->num_clks; i++)
 		bc->clks[i].id = bc_data->clk_names[i];
@@ -249,7 +281,7 @@ static int imx93_blk_ctrl_probe(struct platform_device *pdev)
 	ret = devm_clk_bulk_get(dev, bc->num_clks, bc->clks);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to get bus clock\n");
-		goto free_regmap;
+		return ret;
 	}
 
 	for (i = 0; i < bc_data->num_domains; i++) {
@@ -265,10 +297,8 @@ static int imx93_blk_ctrl_probe(struct platform_device *pdev)
 			domain->clks[j].id = data->clk_names[j];
 
 		ret = devm_clk_bulk_get(dev, data->num_clks, domain->clks);
-		if (ret) {
-			dev_err_probe(dev, ret, "failed to get clock\n");
-			goto cleanup_pds;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to get clock\n");
 
 		domain->genpd.name = data->name;
 		domain->genpd.power_on = imx93_blk_ctrl_power_on;
@@ -276,11 +306,12 @@ static int imx93_blk_ctrl_probe(struct platform_device *pdev)
 		domain->bc = bc;
 
 		ret = pm_genpd_init(&domain->genpd, NULL, true);
-		if (ret) {
-			dev_err_probe(dev, ret, "failed to init power domain\n");
-			goto cleanup_pds;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to init power domain\n");
 
+		ret = devm_add_action_or_reset(dev, imx93_release_pm_genpd, &domain->genpd);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to add pm_genpd release callback\n");
 		/*
 		 * We use runtime PM to trigger power on/off of the upstream GPC
 		 * domain, as a strict hierarchical parent/child power domain
@@ -300,57 +331,47 @@ static int imx93_blk_ctrl_probe(struct platform_device *pdev)
 	for (i = 0; i < bc_data->num_domains; i++) {
 		struct imx93_blk_ctrl_domain *domain = &bc->domains[i];
 		const struct imx93_blk_ctrl_domain_data *data = domain->data;
+		struct imx93_blk_ctrl_subdomain_link *link;
 
 		if (bc_data->skip_mask & BIT(i) ||
 		    data->parent == BLK_CTRL_NO_PARENT)
 			continue;
 
+		link = devm_kzalloc(dev, sizeof(*link), GFP_KERNEL);
+		if (!link)
+			return -ENOMEM;
+
+		link->parent = &bc->domains[data->parent].genpd;
+		link->subdomain = &domain->genpd;
+
 		ret = pm_genpd_add_subdomain(&bc->domains[data->parent].genpd,
 					     &domain->genpd);
-		if (ret) {
-			dev_err_probe(dev, ret, "failed to add subdomain %s\n",
-				      domain->genpd.name);
-			i = bc_data->num_domains;
-			goto cleanup_pds;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to add subdomain %s\n",
+					     domain->genpd.name);
+
+		ret = devm_add_action_or_reset(dev, imx93_release_subdomain, link);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to add subdomain release callback\n");
 	}
 
-	pm_runtime_enable(dev);
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable pm-runtime\n");
 
 	ret = of_genpd_add_provider_onecell(dev->of_node, &bc->onecell_data);
-	if (ret) {
-		dev_err_probe(dev, ret, "failed to add power domain provider\n");
-		goto cleanup_pds;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to add power domain provider\n");
+
+	ret = devm_add_action_or_reset(dev, imx93_release_genpd_provider, dev->of_node);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to add genpd_provider release callback\n");
 
 	dev_set_drvdata(dev, bc);
 
+	ret = devm_of_platform_populate(dev);
 	return 0;
-
-cleanup_pds:
-	for (i--; i >= 0; i--)
-		pm_genpd_remove(&bc->domains[i].genpd);
-
-free_regmap:
-	regmap_exit(bc->regmap);
-
-	return ret;
-}
-
-static void imx93_blk_ctrl_remove(struct platform_device *pdev)
-{
-	struct imx93_blk_ctrl *bc = dev_get_drvdata(&pdev->dev);
-	int i;
-
-	of_genpd_del_provider(pdev->dev.of_node);
-
-	pm_runtime_disable(&pdev->dev);
-
-	for (i = 0; i < bc->onecell_data.num_domains; i++) {
-		struct imx93_blk_ctrl_domain *domain = &bc->domains[i];
-
-		pm_genpd_remove(&domain->genpd);
-	}
 }
 
 static const struct imx93_blk_ctrl_domain_data imx93_media_blk_ctl_domain_data[] = {
@@ -528,7 +549,6 @@ MODULE_DEVICE_TABLE(of, imx93_blk_ctrl_of_match);
 
 static struct platform_driver imx93_blk_ctrl_driver = {
 	.probe = imx93_blk_ctrl_probe,
-	.remove = imx93_blk_ctrl_remove,
 	.driver = {
 		.name = "imx93-blk-ctrl",
 		.pm = &imx93_blk_ctrl_pm_ops,
