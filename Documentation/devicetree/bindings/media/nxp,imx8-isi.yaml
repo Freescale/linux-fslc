@@ -69,7 +69,6 @@ required:
   - interrupts
   - clocks
   - clock-names
-  - fsl,blk-ctrl
   - ports
 
 allOf:
@@ -138,6 +137,18 @@ allOf:
           required:
             - port@2
             - port@3
+
+  - if:
+      properties:
+        compatible:
+          not:
+            contains:
+              enum:
+                - fsl,imx8ulp-isi
+                - fsl,imx91-isi
+    then:
+      required:
+        - fsl,blk-ctrl
 
 additionalProperties: false
 
