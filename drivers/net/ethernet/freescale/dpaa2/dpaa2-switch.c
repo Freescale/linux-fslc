@@ -97,23 +97,30 @@ static void dpaa2_switch_port_set_fdb(struct ethsw_port_priv *port_priv,
 	 * unused FDB and use that.
 	 */
 	if (!linking) {
-		/* This port leaves a bridge, but it's still under a bond.
-		 * Search for the first port under the same bond which already
-		 * left the bridge.
+		bool is_bridge = netif_is_bridge_master(upper_dev);
+		bool last_fdb_user = false;
+
+		if (is_bridge) {
+			last_fdb_user = true;
+			for (i = 0; i < ethsw->sw_attr.num_ifs; i++) {
+				if (!ethsw->ports[i] || ethsw->ports[i] == port_priv)
+					continue;
+				if (ethsw->ports[i]->fdb == port_priv->fdb) {
+					last_fdb_user = false;
+					break;
+				}
+			}
+		}
+
+		/* If this port leaves a bridge while still under a bond, reuse
+		 * the FDB of a bond member that has already left the bridge.
 		 */
-		if (netif_is_bridge_master(upper_dev) && port_priv->lag) {
+		if (is_bridge && port_priv->lag) {
 			for (i = 0; i < ethsw->sw_attr.num_ifs; i++) {
 				other_port_priv = ethsw->ports[i];
-				if (!other_port_priv)
+				if (!other_port_priv || other_port_priv == port_priv)
 					continue;
 
-				if (other_port_priv == port_priv)
-					continue;
-
-				/* Found a port which is under the same bond
-				 * device but already left the bridge. Use
-				 * this port's FDB.
-				 */
 				if (other_port_priv->lag == port_priv->lag &&
 				    other_port_priv->fdb->fdb_id != fdb_id_old) {
 					fdb = other_port_priv->fdb;
@@ -122,22 +129,34 @@ static void dpaa2_switch_port_set_fdb(struct ethsw_port_priv *port_priv,
 			}
 		}
 
-		/* Try to get hold of an unused FDB to use */
-		if (!fdb)
-			fdb = dpaa2_switch_fdb_get_unused(port_priv->ethsw_data);
-
-		if (fdb) {
-			port_priv->fdb = fdb;
-			port_priv->fdb->in_use = true;
+		if (!fdb && is_bridge && last_fdb_user) {
+			port_priv->fdb->bridge_dev = NULL;
+			return;
 		}
 
-		if (netif_is_bridge_master(upper_dev))
+		/* Try to get hold of an unused FDB to use. */
+		if (!fdb)
+			fdb = dpaa2_switch_fdb_get_unused(ethsw);
+
+		if (!fdb) {
+			if (is_bridge)
+				WARN_ON(!fdb);
+			return;
+		}
+
+		/* If the last user leaves for an existing bond FDB, release the
+		 * now-unused bridge FDB. Otherwise other bridge ports still use it.
+		 */
+		if (is_bridge && last_fdb_user) {
+			port_priv->fdb->in_use = false;
+			port_priv->fdb->bridge_dev = NULL;
+		}
+
+		port_priv->fdb = fdb;
+		port_priv->fdb->in_use = true;
+		if (is_bridge)
 			port_priv->fdb->bridge_dev = NULL;
 
-		/* In case all FDBs are already in use, we must be the last
-		 * port that becomes standalone. We can just keep the FDB that
-		 * we already have. Nothing more to do in this case.
-		 */
 		return;
 	}
 
@@ -1717,7 +1736,7 @@ static void dpaa2_switch_port_disconnect_mac(struct ethsw_port_priv *port_priv)
 		dpaa2_mac_disconnect(mac);
 
 	dpaa2_mac_close(mac);
-	dpaa2_mac_driver_attach(mac->mc_dev);
+	put_device(&mac->mc_dev->dev);
 	kfree(mac);
 }
 
@@ -3011,18 +3030,13 @@ static int dpaa2_switch_port_blocking_event(struct notifier_block *nb,
 
 /* Build a linear skb based on a single-buffer frame descriptor */
 static struct sk_buff *dpaa2_switch_build_linear_skb(struct ethsw_core *ethsw,
-						     const struct dpaa2_fd *fd)
+						     const struct dpaa2_fd *fd,
+						     void *fd_vaddr)
 {
 	u16 fd_offset = dpaa2_fd_get_offset(fd);
-	dma_addr_t addr = dpaa2_fd_get_addr(fd);
 	u32 fd_length = dpaa2_fd_get_len(fd);
 	struct device *dev = ethsw->dev;
 	struct sk_buff *skb = NULL;
-	void *fd_vaddr;
-
-	fd_vaddr = dpaa2_iova_to_virt(ethsw->iommu_domain, addr);
-	dma_unmap_page(dev, addr, DPAA2_SWITCH_RX_BUF_SIZE,
-		       DMA_FROM_DEVICE);
 
 	skb = build_skb(fd_vaddr, DPAA2_SWITCH_RX_BUF_SIZE +
 			SKB_DATA_ALIGN(sizeof(struct skb_shared_info)));
@@ -3048,6 +3062,7 @@ static void dpaa2_switch_tx_conf(struct dpaa2_switch_fq *fq,
 static void dpaa2_switch_rx(struct dpaa2_switch_fq *fq,
 			    const struct dpaa2_fd *fd)
 {
+	dma_addr_t addr = dpaa2_fd_get_addr(fd);
 	struct ethsw_core *ethsw = fq->ethsw;
 	struct ethsw_port_priv *port_priv;
 	struct net_device *netdev;
@@ -3056,12 +3071,15 @@ static void dpaa2_switch_rx(struct dpaa2_switch_fq *fq,
 	u16 vlan_tci, vid;
 	int if_id, err;
 	uint64_t flc;
+	void *vaddr;
 
 	flc = dpaa2_fd_get_flc(fd);
+	vaddr = dpaa2_iova_to_virt(ethsw->iommu_domain, addr);
+	dma_unmap_page(ethsw->dev, addr, DPAA2_SWITCH_RX_BUF_SIZE,
+		       DMA_FROM_DEVICE);
 
 	/* get switch ingress interface ID */
 	if_id = DPAA2_ETHSW_FLC_IF_ID(flc);
-
 	if (if_id >= ethsw->sw_attr.num_ifs) {
 		dev_err(ethsw->dev, "Frame received from unknown interface!\n");
 		goto err_free_fd;
@@ -3077,7 +3095,7 @@ static void dpaa2_switch_rx(struct dpaa2_switch_fq *fq,
 		}
 	}
 
-	skb = dpaa2_switch_build_linear_skb(ethsw, fd);
+	skb = dpaa2_switch_build_linear_skb(ethsw, fd, vaddr);
 	if (unlikely(!skb))
 		goto err_free_fd;
 
@@ -3095,7 +3113,8 @@ static void dpaa2_switch_rx(struct dpaa2_switch_fq *fq,
 		err = __skb_vlan_pop(skb, &vlan_tci);
 		if (err) {
 			dev_info(ethsw->dev, "__skb_vlan_pop() returned %d", err);
-			goto err_free_fd;
+			kfree_skb(skb);
+			return;
 		}
 	}
 
@@ -3116,7 +3135,7 @@ static void dpaa2_switch_rx(struct dpaa2_switch_fq *fq,
 	return;
 
 err_free_fd:
-	dpaa2_switch_free_fd(ethsw, fd);
+	free_pages((unsigned long)vaddr, 0);
 }
 
 static void dpaa2_switch_detect_features(struct ethsw_core *ethsw)
@@ -3890,7 +3909,6 @@ static void dpaa2_switch_teardown(struct fsl_mc_device *sw_dev)
 
 static void dpaa2_switch_remove(struct fsl_mc_device *sw_dev)
 {
-	struct ethsw_port_priv *port_priv;
 	struct ethsw_core *ethsw;
 	struct device *dev;
 	int i;
@@ -3902,11 +3920,17 @@ static void dpaa2_switch_remove(struct fsl_mc_device *sw_dev)
 
 	dpsw_disable(ethsw->mc_io, 0, ethsw->dpsw_handle);
 
-	for (i = 0; i < ethsw->sw_attr.num_ifs; i++) {
-		port_priv = ethsw->ports[i];
-		unregister_netdev(port_priv->netdev);
+	/* Unregister all the netdevs so that they are brought down and the
+	 * shared NAPI instances gets disabled.
+	 */
+	for (i = 0; i < ethsw->sw_attr.num_ifs; i++)
+		unregister_netdev(ethsw->ports[i]->netdev);
+
+	for (i = 0; i < DPAA2_SWITCH_RX_NUM_FQS; i++)
+		netif_napi_del(&ethsw->fq[i].napi);
+
+	for (i = 0; i < ethsw->sw_attr.num_ifs; i++)
 		dpaa2_switch_remove_port(ethsw, i);
-	}
 
 	kfree(ethsw->fdbs);
 	kfree(ethsw->filter_blocks);
