@@ -137,7 +137,6 @@ void enetc_refresh_vlan_ht_filter(struct enetc_si *si)
 	}
 }
 EXPORT_SYMBOL_GPL(enetc_refresh_vlan_ht_filter);
-
 void enetc_set_congestion_mode(struct enetc_ndev_priv *priv, bool enable)
 {
 	struct enetc_si *si = priv->si;
@@ -2763,7 +2762,8 @@ static void enetc_xsk_descs_to_tx_ring(struct enetc_bdr *tx_ring,
 			first_txbd = txbd;
 			frm_len = tx_swbd->len;
 
-			meta = xsk_buff_get_metadata(pool, xsk_descs[j].addr);
+			meta = xsk_buff_get_metadata(pool, xsk_descs[j].addr,
+									     xsk_descs[j].options);
 			if (!meta)
 				goto no_metadata_req;
 
@@ -3672,11 +3672,16 @@ static void enetc_disable_txbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring)
 
 static void enetc_disable_rx_bdrs(struct enetc_ndev_priv *priv)
 {
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_disable_rxbdr(hw, priv->rx_ring[i]);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_disable_tx_bdrs(struct enetc_ndev_priv *priv)
