@@ -2169,6 +2169,10 @@ static bool route_shortcircuit(struct net_device *dev, struct sk_buff *skb)
 		neigh_ha_snapshot(haddr, n, dev);
 		diff = !ether_addr_equal_unaligned(eth_hdr(skb)->h_dest, haddr);
 		if (diff) {
+			if (skb_cow_head(skb, 0)) {
+				neigh_release(n);
+				return false;
+			}
 			memcpy(eth_hdr(skb)->h_source, eth_hdr(skb)->h_dest,
 				dev->addr_len);
 			memcpy(eth_hdr(skb)->h_dest, haddr, dev->addr_len);
