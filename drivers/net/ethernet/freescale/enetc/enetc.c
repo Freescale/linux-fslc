@@ -2027,7 +2027,7 @@ int enetc_xdp_xmit(struct net_device *ndev, int num_frames,
 
 	for (k = 0; k < num_frames; k++) {
 		if (unlikely(enetc_xdp_frame_to_xdp_tx_swbd(tx_ring, frames[k],
-							    &xdp_tx_bd_cnt))) {
+								    &xdp_tx_bd_cnt))) {
 			tx_ring->stats.xdp_tx_drops++;
 			break;
 		}
