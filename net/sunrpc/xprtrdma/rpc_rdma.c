@@ -543,6 +543,7 @@ void rpcrdma_sendctx_unmap(struct rpcrdma_sendctx *sc)
 	rpcrdma_sendctx_dma_unmap(sc);
 	req->rl_sendctx = NULL;
 	sc->sc_req = NULL;
+	req->rl_sendctx = NULL;
 	rpcrdma_req_put(req);
 }
 
@@ -556,6 +557,7 @@ static void rpcrdma_sendctx_cancel(struct rpcrdma_sendctx *sc)
 	rpcrdma_sendctx_dma_unmap(sc);
 	req->rl_sendctx = NULL;
 	sc->sc_req = NULL;
+	req->rl_sendctx = NULL;
 }
 
 /* Prepare an SGE for the RPC-over-RDMA transport header.
