@@ -2772,8 +2772,8 @@ static void enetc_xsk_descs_to_tx_ring(struct enetc_bdr *tx_ring,
 			meta_req.index = &i;
 			meta_req.txbd_update = false;
 
-			xsk_tx_metadata_request(meta, &enetc_xsk_tx_metadata_ops,
-						&meta_req);
+			xsk_tx_metadata_request(pool, &meta,
+						&enetc_xsk_tx_metadata_ops, &meta_req);
 			xsk_tx_metadata_to_compl(meta, &tx_swbd->xsk_meta);
 
 			/* Update txbd and tx_swbd, because i may have been
