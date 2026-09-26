@@ -319,7 +319,7 @@ to_imx_sc_pd(struct generic_pm_domain *genpd)
 	return container_of(genpd, struct imx_sc_pm_domain, pd);
 }
 
-static int imx_pm_domains_suspend(void)
+static int imx_pm_domains_suspend(void *data)
 {
 	struct arm_smccc_res res;
 
@@ -330,8 +330,12 @@ static int imx_pm_domains_suspend(void)
 	return 0;
 }
 
-struct syscore_ops imx_pm_domains_syscore_ops = {
+static const struct syscore_ops imx_pm_domains_syscore_ops = {
 	.suspend = imx_pm_domains_suspend,
+};
+
+static struct syscore imx_pm_domains_syscore = {
+	.ops = &imx_pm_domains_syscore_ops,
 };
 
 static void imx_sc_pd_get_console_rsrc(void)
@@ -569,7 +573,7 @@ static int imx_sc_pd_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	imx_sc_pd_get_console_rsrc();
-	register_syscore_ops(&imx_pm_domains_syscore_ops);
+	register_syscore(&imx_pm_domains_syscore);
 
 	return imx_scu_init_pm_domains(&pdev->dev, pd_soc);
 }

@@ -64,7 +64,10 @@ enum fsl_asoc_card_type {
  * @mclk_id: MCLK (or main clock) id for set_sysclk()
  * @fll_id: FLL (or secordary clock) id for set_sysclk()
  * @pll_id: PLL id for set_pll()
- * @pll_ratio_s24: ratio for 24bit format
+ * @pll_ratio_s24: PLL output ratio for S24_LE and S20_3LE formats
+ *                 (PLL_freq = sample_rate × ratio). Default is 384, but some
+ *                 codecs (e.g., WM8904) require lower values to stay within
+ *                 PLL frequency limits
  */
 struct codec_priv {
 	struct clk *mclk;
@@ -812,8 +815,8 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 
 	cpu_pdev = of_find_device_by_node(cpu_np);
 	if (!cpu_pdev) {
-		dev_err(&pdev->dev, "failed to find CPU DAI device\n");
-		ret = -EINVAL;
+		ret = dev_err_probe(&pdev->dev, -EPROBE_DEFER,
+				    "failed to find CPU DAI device\n");
 		goto fail;
 	}
 
@@ -903,6 +906,7 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 	for (codec_idx = 0; codec_idx < 2; codec_idx++) {
 		priv->codec_priv[codec_idx].fll_id = -1;
 		priv->codec_priv[codec_idx].pll_id = -1;
+		priv->codec_priv[codec_idx].pll_ratio_s24 = 384;
 	}
 
 	/* Diversify the card configurations */

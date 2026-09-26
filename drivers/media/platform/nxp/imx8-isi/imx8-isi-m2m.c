@@ -515,6 +515,7 @@ __mxc_isi_m2m_try_fmt_vid(struct mxc_isi_m2m_ctx *ctx,
 		&ctx->queues.out.format;
 
 	if (type == MXC_ISI_VIDEO_M2M_CAP) {
+
 		/* Downscaling only, by up to 16. */
 		pix->width = mxc_isi_clamp_downscale_16(pix->width,
 							format->width);

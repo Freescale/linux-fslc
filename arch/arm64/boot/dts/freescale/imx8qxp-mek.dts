@@ -1023,7 +1023,6 @@ pcam_i2c: &cm40_i2c {
 	phy-names = "pcie-phy";
 	pinctrl-0 = <&pinctrl_pcieb>;
 	pinctrl-names = "default";
-	vpcie-supply = <&reg_pcieb>;
 	status = "disabled";
 };
 

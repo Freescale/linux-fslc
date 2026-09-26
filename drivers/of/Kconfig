@@ -81,7 +81,7 @@ config OF_KOBJ
 # Hardly any platforms need this.  It is safe to select, but only do so if you
 # need it.
 config OF_DYNAMIC
-	bool "Support for dynamic device trees" if OF_UNITTEST
+	bool "Support for dynamic device trees"
 	select OF_KOBJ
 	help
 	  On some platforms, the device tree can be manipulated at runtime.

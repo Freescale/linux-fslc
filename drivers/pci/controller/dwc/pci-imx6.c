@@ -180,10 +180,10 @@ struct imx_lut_data {
 struct imx_pcie {
 	struct dw_pcie		*pci;
 	struct gpio_desc	*reset_gpiod;
+	bool			enable_ext_refclk;
 	struct clk_bulk_data	*clks;
 	int			host_wake_irq;
 	int			num_clks;
-	bool			enable_ext_refclk;
 	bool			pll_locked;
 	bool			supports_clkreq;
 	struct regmap		*iomuxc_gpr;
@@ -316,7 +316,6 @@ static void imx95_pcie_phy_write(struct imx_pcie *imx_pcie, int addr, u16 data)
 			   IMX95_PCIE_PHY_REG_ADDR_MASK, addr);
 	regmap_write(imx_pcie->iomuxc_gpr, IMX95_PCIE_PHY_REG_DATA, data);
 }
-
 static int imx95_pcie_init_phy(struct imx_pcie *imx_pcie)
 {
 	/*

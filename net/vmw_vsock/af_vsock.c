@@ -1412,7 +1412,7 @@ int vsock_dgram_recvmsg(struct socket *sock, struct msghdr *msg,
 
 	prot = READ_ONCE(sk->sk_prot);
 	if (prot != &vsock_proto)
-		return prot->recvmsg(sk, msg, len, flags, NULL);
+		return prot->recvmsg(sk, msg, len, flags);
 #endif
 
 	return __vsock_dgram_recvmsg(sock, msg, len, flags);
@@ -1716,12 +1716,10 @@ static int vsock_connect(struct socket *sock, struct sockaddr *addr,
 		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 	}
 
-	if (sk->sk_err) {
-		err = -sk->sk_err;
+	err = sock_error(sk);
+	if (err) {
 		sk->sk_state = TCP_CLOSE;
 		sock->state = SS_UNCONNECTED;
-	} else {
-		err = 0;
 	}
 
 out_wait:
@@ -1760,10 +1758,10 @@ static int vsock_accept(struct socket *sock, struct socket *newsock,
 	 * created upon connection establishment.
 	 */
 	timeout = sock_rcvtimeo(listener, arg->flags & O_NONBLOCK);
-	prepare_to_wait(sk_sleep(listener), &wait, TASK_INTERRUPTIBLE);
 
 	while ((connected = vsock_dequeue_accept(listener)) == NULL &&
-	       listener->sk_err == 0) {
+		timeout != 0) {
+		prepare_to_wait(sk_sleep(listener), &wait, TASK_INTERRUPTIBLE);
 		release_sock(listener);
 		timeout = schedule_timeout(timeout);
 		finish_wait(sk_sleep(listener), &wait);
@@ -1772,19 +1770,12 @@ static int vsock_accept(struct socket *sock, struct socket *newsock,
 		if (signal_pending(current)) {
 			err = sock_intr_errno(timeout);
 			goto out;
-		} else if (timeout == 0) {
-			err = -EAGAIN;
-			goto out;
 		}
-
-		prepare_to_wait(sk_sleep(listener), &wait, TASK_INTERRUPTIBLE);
 	}
-	finish_wait(sk_sleep(listener), &wait);
 
-	if (listener->sk_err)
-		err = -listener->sk_err;
-
-	if (connected) {
+	if (!connected) {
+		err = -EAGAIN;
+	} else {
 		sk_acceptq_removed(listener);
 
 		lock_sock_nested(connected, SINGLE_DEPTH_NESTING);
@@ -2485,7 +2476,7 @@ vsock_connectible_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 
 	prot = READ_ONCE(sk->sk_prot);
 	if (prot != &vsock_proto)
-		return prot->recvmsg(sk, msg, len, flags, NULL);
+		return prot->recvmsg(sk, msg, len, flags);
 #endif
 
 	return __vsock_connectible_recvmsg(sock, msg, len, flags);
