@@ -108,6 +108,7 @@ bool imx_mu_is_m4_in_low_freq(void);
 bool imx_mu_is_m4_in_stop(void);
 void imx_mu_set_m4_run_mode(void);
 void imx_src_init(void);
+void imx7_src_init(void);
 void imx_gpc_pre_suspend(bool arm_power_off);
 void imx_gpc_post_resume(void);
 void imx_gpc_switch_pupscr_clk(bool flag);

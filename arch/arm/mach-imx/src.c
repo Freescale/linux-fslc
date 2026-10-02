@@ -37,6 +37,8 @@
 static void __iomem *src_base;
 static DEFINE_SPINLOCK(src_lock);
 static bool m4_is_enabled;
+static bool gpr_v2;
+static void __iomem *gpc_base;
 
 static const int sw_reset_bits[5] = {
 	BP_SRC_SCR_SW_GPU_RST,
