@@ -188,31 +188,6 @@ void __init imx_src_init(void)
 	spin_unlock(&src_lock);
 }
 
-void __init imx7_src_init(void)
-{
-	struct device_node *np;
-
-	gpr_v2 = true;
-
-	np = of_find_compatible_node(NULL, NULL, "fsl,imx7d-src");
-	if (!np)
-		return;
-
-	src_base = of_iomap(np, 0);
-	of_node_put(np);
-	if (!src_base)
-		return;
-
-	np = of_find_compatible_node(NULL, NULL, "fsl,imx7d-gpc");
-	if (!np)
-		return;
-
-	gpc_base = of_iomap(np, 0);
-	of_node_put(np);
-	if (!gpc_base)
-		return;
-}
-
 static const struct of_device_id imx_src_dt_ids[] = {
 	{ .compatible = "fsl,imx51-src" },
 	{ /* sentinel */ }
