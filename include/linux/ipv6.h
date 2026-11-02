@@ -213,28 +213,9 @@ struct ipv6_pinfo {
 	__be32			flow_label;
 	__u32			frag_size;
 
-	/*
-	 * Packed in 16bits.
-	 * Omit one shift by putting the signed field at MSB.
-	 */
-#if defined(__BIG_ENDIAN_BITFIELD)
-	__s16			hop_limit:9;
-	__u16			__unused_1:7;
-#else
-	__u16			__unused_1:7;
-	__s16			hop_limit:9;
-#endif
+	s16			hop_limit;
+	u8			mcast_hops;
 
-#if defined(__BIG_ENDIAN_BITFIELD)
-	/* Packed in 16bits. */
-	__s16			mcast_hops:9;
-	__u16			__unused_2:6,
-				mc_loop:1;
-#else
-	__u16			mc_loop:1,
-				__unused_2:6;
-	__s16			mcast_hops:9;
-#endif
 	int			ucast_oif;
 	int			mcast_oif;
 
@@ -292,6 +273,18 @@ struct ipv6_pinfo {
 	struct sk_buff		*rxpmtu;
 	struct inet6_cork	cork;
 };
+
+/* We currently use available bits from inet_sk(sk)->inet_flags,
+ * this could change in the future.
+ */
+#define inet6_test_bit(nr, sk)			\
+	test_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
+#define inet6_set_bit(nr, sk)			\
+	set_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
+#define inet6_clear_bit(nr, sk)			\
+	clear_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
+#define inet6_assign_bit(nr, sk, val)		\
+	assign_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags, val)
 
 /* WARNING: don't change the layout of the members in {raw,udp,tcp}6_sock! */
 struct raw6_sock {

@@ -761,7 +761,7 @@ out:
 	return ret;
 }
 
-bool sk_mc_loop(struct sock *sk)
+bool sk_mc_loop(const struct sock *sk)
 {
 	if (dev_recursion_level())
 		return false;
@@ -773,7 +773,7 @@ bool sk_mc_loop(struct sock *sk)
 		return inet_test_bit(MC_LOOP, sk);
 #if IS_ENABLED(CONFIG_IPV6)
 	case AF_INET6:
-		return inet6_sk(sk)->mc_loop;
+		return inet6_test_bit(MC6_LOOP, sk);
 #endif
 	}
 	return true;
@@ -3608,7 +3608,14 @@ int sock_gettstamp(struct socket *sock, void __user *userstamp,
 	struct sock *sk = sock->sk;
 	struct timespec64 ts;
 
-	sock_enable_timestamp(sk, SOCK_TIMESTAMP);
+	/* sk->sk_flags must only be changed under the socket lock,
+	 * because sock_set_flag() uses non atomic operations.
+	 */
+	if (!sock_flag(sk, SOCK_TIMESTAMP)) {
+		lock_sock(sk);
+		sock_enable_timestamp(sk, SOCK_TIMESTAMP);
+		release_sock(sk);
+	}
 	ts = ktime_to_timespec64(sock_read_timestamp(sk));
 	if (ts.tv_sec == -1)
 		return -ENOENT;

@@ -653,7 +653,6 @@ static void nft_rbtree_gc(struct nft_set *set)
 {
 	struct nft_rbtree *priv = nft_set_priv(set);
 	struct nft_rbtree_elem *rbe, *rbe_end = NULL;
-	struct nftables_pernet *nft_net;
 	struct net *net = read_pnet(&set->net);
 	u64 tstamp = nft_net_tstamp(net);
 	struct rb_node *node, *next;
@@ -661,7 +660,6 @@ static void nft_rbtree_gc(struct nft_set *set)
 
 	set  = nft_set_container_of(priv);
 	net  = read_pnet(&set->net);
-	nft_net = nft_pernet(net);
 
 	gc = nft_trans_gc_alloc(set, 0, GFP_KERNEL);
 	if (!gc)

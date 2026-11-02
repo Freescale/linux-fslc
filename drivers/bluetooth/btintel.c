@@ -235,7 +235,7 @@ static int btintel_set_diag_combined(struct hci_dev *hdev, bool enable)
 	return ret;
 }
 
-static void btintel_hw_error(struct hci_dev *hdev, u8 code)
+void btintel_hw_error(struct hci_dev *hdev, u8 code)
 {
 	struct sk_buff *skb;
 	u8 type = 0x00;
@@ -272,6 +272,7 @@ static void btintel_hw_error(struct hci_dev *hdev, u8 code)
 unlock:
 	hci_req_sync_unlock(hdev);
 }
+EXPORT_SYMBOL_GPL(btintel_hw_error);
 
 int btintel_version_info(struct hci_dev *hdev, struct intel_version *ver)
 {
@@ -450,8 +451,8 @@ int btintel_read_version(struct hci_dev *hdev, struct intel_version *ver)
 }
 EXPORT_SYMBOL_GPL(btintel_read_version);
 
-static int btintel_version_info_tlv(struct hci_dev *hdev,
-				    struct intel_version_tlv *version)
+int btintel_version_info_tlv(struct hci_dev *hdev,
+			     struct intel_version_tlv *version)
 {
 	const char *variant;
 
@@ -530,16 +531,51 @@ static int btintel_version_info_tlv(struct hci_dev *hdev,
 	bt_dev_info(hdev, "%s timestamp %u.%u buildtype %u build %u", variant,
 		    2000 + (version->timestamp >> 8), version->timestamp & 0xff,
 		    version->build_type, version->build_num);
+	if (version->img_type == 0x03)
+		bt_dev_info(hdev, "Firmware SHA1: 0x%8.8x", version->git_sha1);
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_version_info_tlv);
 
-static int btintel_parse_version_tlv(struct hci_dev *hdev,
-				     struct intel_version_tlv *version,
-				     struct sk_buff *skb)
+static u8 btintel_version_tlv_min_len(u8 type)
+{
+	switch (type) {
+	case INTEL_TLV_CNVI_TOP:
+	case INTEL_TLV_CNVR_TOP:
+	case INTEL_TLV_CNVI_BT:
+	case INTEL_TLV_CNVR_BT:
+	case INTEL_TLV_BUILD_NUM:
+	case INTEL_TLV_GIT_SHA1:
+		return sizeof(u32);
+	case INTEL_TLV_DEV_REV_ID:
+	case INTEL_TLV_TIME_STAMP:
+		return sizeof(u16);
+	case INTEL_TLV_IMAGE_TYPE:
+	case INTEL_TLV_BUILD_TYPE:
+	case INTEL_TLV_SECURE_BOOT:
+	case INTEL_TLV_OTP_LOCK:
+	case INTEL_TLV_API_LOCK:
+	case INTEL_TLV_DEBUG_LOCK:
+	case INTEL_TLV_LIMITED_CCE:
+	case INTEL_TLV_SBE_TYPE:
+		return sizeof(u8);
+	case INTEL_TLV_MIN_FW:
+		return 3;
+	case INTEL_TLV_OTP_BDADDR:
+		return sizeof(bdaddr_t);
+	default:
+		return 0;
+	}
+}
+
+int btintel_parse_version_tlv(struct hci_dev *hdev,
+			      struct intel_version_tlv *version,
+			      struct sk_buff *skb)
 {
 	/* Consume Command Complete Status field */
-	skb_pull(skb, 1);
+	if (!skb_pull(skb, 1))
+		return -EINVAL;
 
 	/* Event parameters contatin multiple TLVs. Read each of them
 	 * and only keep the required data. Also, it use existing legacy
@@ -557,6 +593,9 @@ static int btintel_parse_version_tlv(struct hci_dev *hdev,
 
 		/* Make sure skb has a enough data */
 		if (skb->len < tlv->len + sizeof(*tlv))
+			return -EINVAL;
+
+		if (tlv->len < btintel_version_tlv_min_len(tlv->type))
 			return -EINVAL;
 
 		switch (tlv->type) {
@@ -625,6 +664,9 @@ static int btintel_parse_version_tlv(struct hci_dev *hdev,
 			memcpy(&version->otp_bd_addr, tlv->val,
 							sizeof(bdaddr_t));
 			break;
+		case INTEL_TLV_GIT_SHA1:
+			version->git_sha1 = get_unaligned_le32(tlv->val);
+			break;
 		default:
 			/* Ignore rest of information */
 			break;
@@ -635,6 +677,7 @@ static int btintel_parse_version_tlv(struct hci_dev *hdev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_parse_version_tlv);
 
 static int btintel_read_version_tlv(struct hci_dev *hdev,
 				    struct intel_version_tlv *version)
@@ -2526,8 +2569,8 @@ static void btintel_set_dsm_reset_method(struct hci_dev *hdev,
 	data->acpi_reset_method = btintel_acpi_reset_method;
 }
 
-static int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
-					struct intel_version_tlv *ver)
+int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
+				 struct intel_version_tlv *ver)
 {
 	u32 boot_param;
 	char ddcname[64];
@@ -2594,8 +2637,9 @@ finish:
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_bootloader_setup_tlv);
 
-static void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
+void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
 {
 	switch (hw_variant) {
 	/* Legacy bootloader devices that supports MSFT Extension */
@@ -2618,6 +2662,7 @@ static void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
 		break;
 	}
 }
+EXPORT_SYMBOL_GPL(btintel_set_msft_opcode);
 
 static int btintel_setup_combined(struct hci_dev *hdev)
 {
@@ -2868,7 +2913,7 @@ exit_error:
 	return err;
 }
 
-static int btintel_shutdown_combined(struct hci_dev *hdev)
+int btintel_shutdown_combined(struct hci_dev *hdev)
 {
 	struct sk_buff *skb;
 	int ret;
@@ -2902,6 +2947,7 @@ static int btintel_shutdown_combined(struct hci_dev *hdev)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(btintel_shutdown_combined);
 
 int btintel_configure_setup(struct hci_dev *hdev, const char *driver_name)
 {
