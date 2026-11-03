@@ -73,7 +73,7 @@ static inline unsigned int file_hash(struct nfs_fh *f)
 
 int lock_to_openmode(struct file_lock *lock)
 {
-	return (lock->fl_type == F_WRLCK) ? O_WRONLY : O_RDONLY;
+	return (lock->c.flc_type == F_WRLCK) ? O_WRONLY : O_RDONLY;
 }
 
 /*
@@ -87,11 +87,22 @@ static __be32 nlm_do_fopen(struct svc_rqst *rqstp,
 			   struct nlm_file *file, int mode)
 {
 	struct file **fp = &file->f_file[mode];
+	const struct nlmsvc_binding *ops;
 	__be32	nfserr;
 
 	if (*fp)
 		return 0;
-	nfserr = nlmsvc_ops->fopen(rqstp, &file->f_handle, fp, mode);
+
+	rcu_read_lock();
+	ops = rcu_dereference(nlmsvc_ops);
+	if (!ops || !try_module_get(ops->owner)) {
+		rcu_read_unlock();
+		return nlm_lck_denied_nolocks;
+	}
+	rcu_read_unlock();
+
+	nfserr = ops->fopen(rqstp, &file->f_handle, fp, mode);
+	module_put(ops->owner);
 	if (nfserr)
 		dprintk("lockd: open failed (error %d)\n", nfserr);
 	return nfserr;
@@ -167,11 +178,28 @@ nlm_delete_file(struct nlm_file *file)
 {
 	nlm_debug_print_file("closing file", file);
 	if (!hlist_unhashed(&file->f_list)) {
+		const struct nlmsvc_binding *ops;
+		bool have_ops;
+
 		hlist_del(&file->f_list);
-		if (file->f_file[O_RDONLY])
-			nlmsvc_ops->fclose(file->f_file[O_RDONLY]);
-		if (file->f_file[O_WRONLY])
-			nlmsvc_ops->fclose(file->f_file[O_WRONLY]);
+
+		rcu_read_lock();
+		ops = rcu_dereference(nlmsvc_ops);
+		have_ops = ops && try_module_get(ops->owner);
+		rcu_read_unlock();
+
+		if (have_ops) {
+			if (file->f_file[O_RDONLY])
+				ops->fclose(file->f_file[O_RDONLY]);
+			if (file->f_file[O_WRONLY])
+				ops->fclose(file->f_file[O_WRONLY]);
+			module_put(ops->owner);
+		} else {
+			if (file->f_file[O_RDONLY])
+				fput(file->f_file[O_RDONLY]);
+			if (file->f_file[O_WRONLY])
+				fput(file->f_file[O_WRONLY]);
+		}
 		kfree(file);
 	} else {
 		printk(KERN_WARNING "lockd: attempt to release unknown file!\n");
@@ -183,18 +211,18 @@ static int nlm_unlock_files(struct nlm_file *file, const struct file_lock *fl)
 	struct file_lock lock;
 
 	locks_init_lock(&lock);
-	lock.fl_type  = F_UNLCK;
+	lock.c.flc_type  = F_UNLCK;
 	lock.fl_start = 0;
 	lock.fl_end   = OFFSET_MAX;
-	lock.fl_owner = fl->fl_owner;
-	lock.fl_pid   = fl->fl_pid;
-	lock.fl_flags = FL_POSIX;
+	lock.c.flc_owner = fl->c.flc_owner;
+	lock.c.flc_pid   = fl->c.flc_pid;
+	lock.c.flc_flags = FL_POSIX;
 
-	lock.fl_file = file->f_file[O_RDONLY];
-	if (lock.fl_file && vfs_lock_file(lock.fl_file, F_SETLK, &lock, NULL))
+	lock.c.flc_file = file->f_file[O_RDONLY];
+	if (lock.c.flc_file && vfs_lock_file(lock.c.flc_file, F_SETLK, &lock, NULL))
 		goto out_err;
-	lock.fl_file = file->f_file[O_WRONLY];
-	if (lock.fl_file && vfs_lock_file(lock.fl_file, F_SETLK, &lock, NULL))
+	lock.c.flc_file = file->f_file[O_WRONLY];
+	if (lock.c.flc_file && vfs_lock_file(lock.c.flc_file, F_SETLK, &lock, NULL))
 		goto out_err;
 	return 0;
 out_err:
@@ -227,7 +255,7 @@ again:
 		/* update current lock count */
 		file->f_locks++;
 
-		lockhost = ((struct nlm_lockowner *)fl->fl_owner)->host;
+		lockhost = ((struct nlm_lockowner *) fl->c.flc_owner)->host;
 		if (match(lockhost, host)) {
 
 			spin_unlock(&flctx->flc_lock);
@@ -493,7 +521,7 @@ EXPORT_SYMBOL_GPL(nlmsvc_unlock_all_by_sb);
 static int
 nlmsvc_match_ip(void *datap, struct nlm_host *host)
 {
-	return rpc_cmp_addr(nlm_srcaddr(host), datap);
+	return rpc_cmp_addr(nlm_srcaddr(datap), (struct sockaddr *)host);
 }
 
 /**

@@ -24,6 +24,8 @@
 
 #include "dm_services.h"
 
+#include "amdgpu.h"
+
 #include "dc.h"
 
 #include "core_status.h"
@@ -823,16 +825,18 @@ static void dc_destruct(struct dc *dc)
 	if (dc->link_srv)
 		link_destroy_link_service(&dc->link_srv);
 
-	if (dc->ctx->gpio_service)
-		dal_gpio_service_destroy(&dc->ctx->gpio_service);
+	if (dc->ctx) {
+		if (dc->ctx->gpio_service)
+			dal_gpio_service_destroy(&dc->ctx->gpio_service);
 
-	if (dc->ctx->created_bios)
-		dal_bios_parser_destroy(&dc->ctx->dc_bios);
+		if (dc->ctx->created_bios)
+			dal_bios_parser_destroy(&dc->ctx->dc_bios);
+		kfree(dc->ctx->logger);
+		dc_perf_trace_destroy(&dc->ctx->perf_trace);
 
-	dc_perf_trace_destroy(&dc->ctx->perf_trace);
-
-	kfree(dc->ctx);
-	dc->ctx = NULL;
+		kfree(dc->ctx);
+		dc->ctx = NULL;
+	}
 
 	kfree(dc->bw_vbios);
 	dc->bw_vbios = NULL;
@@ -871,6 +875,15 @@ static bool dc_construct_ctx(struct dc *dc,
 	dc_ctx->nbio_reg_offsets = init_params->nbio_reg_offsets;
 
 	/* Create logger */
+	dc_ctx->logger = kmalloc(sizeof(*dc_ctx->logger), GFP_KERNEL);
+
+	if (!dc_ctx->logger) {
+		kfree(dc_ctx);
+		return false;
+	}
+
+	dc_ctx->logger->dev = adev_to_drm(init_params->driver);
+	dc->dml.logger = dc_ctx->logger;
 
 	dc_ctx->dce_version = resource_parse_asic_id(init_params->asic_id);
 

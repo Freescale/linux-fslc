@@ -595,6 +595,7 @@ static inline void sch_tree_unlock(struct Qdisc *q)
 extern struct Qdisc noop_qdisc;
 extern struct Qdisc_ops noop_qdisc_ops;
 extern struct Qdisc_ops pfifo_fast_ops;
+extern const u8 sch_default_prio2band[TC_PRIO_MAX + 1];
 extern struct Qdisc_ops mq_qdisc_ops;
 extern struct Qdisc_ops noqueue_qdisc_ops;
 extern const struct Qdisc_ops *default_qdisc_ops;
@@ -1077,12 +1078,17 @@ static inline struct sk_buff *qdisc_dequeue_internal(struct Qdisc *sch, bool dir
 	skb = __skb_dequeue(&sch->gso_skb);
 	if (skb) {
 		sch->q.qlen--;
+		qdisc_qstats_backlog_dec(sch, skb);
 		return skb;
 	}
-	if (direct)
-		return __qdisc_dequeue_head(&sch->q);
-	else
+	if (direct) {
+		skb = __qdisc_dequeue_head(&sch->q);
+		if (skb)
+			qdisc_qstats_backlog_dec(sch, skb);
+		return skb;
+	} else {
 		return sch->dequeue(sch);
+	}
 }
 
 static inline struct sk_buff *qdisc_dequeue_head(struct Qdisc *sch)

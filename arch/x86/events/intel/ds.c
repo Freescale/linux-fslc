@@ -256,12 +256,14 @@ static inline void pebs_set_tlb_lock(u64 *val, bool tlb, bool lock)
 }
 
 /* Retrieve the latency data for e-core of ADL */
-static u64 __adl_latency_data_small(struct perf_event *event, u64 status,
-				     u8 dse, bool tlb, bool lock, bool blk)
+static u64 __grt_latency_data(struct perf_event *event, u64 status,
+			       u8 dse, bool tlb, bool lock, bool blk)
 {
+	union perf_mem_data_src src;
 	u64 val;
 
-	WARN_ON_ONCE(hybrid_pmu(event->pmu)->cpu_type == hybrid_big);
+	WARN_ON_ONCE(is_hybrid() &&
+		     hybrid_pmu(event->pmu)->cpu_type == hybrid_big);
 
 	dse &= PERF_PEBS_DATA_SOURCE_MASK;
 	val = hybrid_var(event->pmu, pebs_data_source)[dse];
@@ -273,18 +275,27 @@ static u64 __adl_latency_data_small(struct perf_event *event, u64 status,
 	else
 		val |= P(BLK, NA);
 
-	return val;
+	src.val = val;
+
+	if (event->hw.flags &
+	    (PERF_X86_EVENT_PEBS_LDLAT | PERF_X86_EVENT_PEBS_LD_HSW))
+		src.mem_op = P(OP, LOAD);
+	if (event->hw.flags &
+	    (PERF_X86_EVENT_PEBS_STLAT | PERF_X86_EVENT_PEBS_ST_HSW))
+		src.mem_op = P(OP, STORE);
+
+	return src.val;
 }
 
-u64 adl_latency_data_small(struct perf_event *event, u64 status)
+u64 grt_latency_data(struct perf_event *event, u64 status)
 {
 	union intel_x86_pebs_dse dse;
 
 	dse.val = status;
 
-	return __adl_latency_data_small(event, status, dse.ld_dse,
-					dse.ld_locked, dse.ld_stlb_miss,
-					dse.ld_data_blk);
+	return __grt_latency_data(event, status, dse.ld_dse,
+				  dse.ld_locked, dse.ld_stlb_miss,
+				  dse.ld_data_blk);
 }
 
 /* Retrieve the latency data for e-core of MTL */
@@ -294,9 +305,9 @@ u64 mtl_latency_data_small(struct perf_event *event, u64 status)
 
 	dse.val = status;
 
-	return __adl_latency_data_small(event, status, dse.mtl_dse,
-					dse.mtl_stlb_miss, dse.mtl_locked,
-					dse.mtl_fwd_blk);
+	return __grt_latency_data(event, status, dse.mtl_dse,
+				  dse.mtl_stlb_miss, dse.mtl_locked,
+				  dse.mtl_fwd_blk);
 }
 
 static u64 load_latency_data(struct perf_event *event, u64 status)
@@ -845,7 +856,10 @@ unlock:
 
 void intel_pmu_drain_pebs_buffer(void)
 {
+	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	struct perf_sample_data data;
+
+	WARN_ON_ONCE(cpuc->enabled);
 
 	static_call(x86_pmu_drain_pebs)(NULL, &data);
 }
@@ -891,8 +905,8 @@ struct event_constraint intel_glm_pebs_event_constraints[] = {
 
 struct event_constraint intel_grt_pebs_event_constraints[] = {
 	/* Allow all events as PEBS with no flags */
-	INTEL_HYBRID_LAT_CONSTRAINT(0x5d0, 0x3),
-	INTEL_HYBRID_LAT_CONSTRAINT(0x6d0, 0xf),
+	INTEL_HYBRID_LDLAT_CONSTRAINT(0x5d0, 0x3),
+	INTEL_HYBRID_STLAT_CONSTRAINT(0x6d0, 0x3f),
 	EVENT_CONSTRAINT_END
 };
 
@@ -1327,8 +1341,11 @@ static void intel_pmu_pebs_via_pt_enable(struct perf_event *event)
 static inline void intel_pmu_drain_large_pebs(struct cpu_hw_events *cpuc)
 {
 	if (cpuc->n_pebs == cpuc->n_large_pebs &&
-	    cpuc->n_pebs != cpuc->n_pebs_via_pt)
+	    cpuc->n_pebs != cpuc->n_pebs_via_pt) {
+		int enabled = __intel_pmu_quiesce();
 		intel_pmu_drain_pebs_buffer();
+		__intel_pmu_resume(enabled);
+	}
 }
 
 void intel_pmu_pebs_enable(struct perf_event *event)

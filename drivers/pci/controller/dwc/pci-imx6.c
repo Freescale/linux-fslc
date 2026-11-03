@@ -117,6 +117,11 @@ enum imx6_pcie_variants {
 #define IMX6_PCIE_FLAG_SUPPORTS_SUSPEND		BIT(2)
 #define IMX6_PCIE_FLAG_IMX6_CPU_ADDR_FIXUP	BIT(3)
 #define IMX6_PCIE_FLAG_SUPPORT_64BIT		BIT(8)
+/*
+ * Because of ERR005723 (PCIe does not support L2 power down) we need to
+ * workaround suspend resume on some devices which are affected by this errata.
+ */
+#define IMX6_PCIE_FLAG_BROKEN_SUSPEND		BIT(9)
 
 #define imx6_check_flag(pci, val)	(pci->drvdata->flags & val)
 
@@ -1746,18 +1751,16 @@ static int imx6_pcie_suspend_noirq(struct device *dev)
 	if (!(imx6_pcie->drvdata->flags & IMX6_PCIE_FLAG_SUPPORTS_SUSPEND))
 		return 0;
 
-	if (unlikely(imx6_pcie->drvdata->variant == IMX6Q)) {
+	imx6_pcie_msi_save_restore(imx6_pcie, true);
+	if (imx6_pcie->drvdata->flags & IMX6_PCIE_FLAG_BROKEN_SUSPEND) {
 		/*
-		 * L2 can exit by 'reset' or Inband beacon (from remote EP)
-		 * toggling phy_powerdown has same effect as 'inband beacon'
-		 * So, toggle bit18 of GPR1, used as a workaround of errata
-		 * ERR005723 "PCIe PCIe does not support L2 Power Down"
+		 * The minimum for a workaround would be to set PERST# and to
+		 * set the PCIE_TEST_PD flag. However, we can also disable the
+		 * clock which saves some power.
 		 */
-		regmap_update_bits(imx6_pcie->iomuxc_gpr, IOMUXC_GPR1,
-				   IMX6Q_GPR1_PCIE_TEST_PD,
-				   IMX6Q_GPR1_PCIE_TEST_PD);
+		imx6_pcie_assert_core_reset(imx6_pcie);
+		imx6_pcie_disable_ref_clk(imx6_pcie);
 	} else {
-		imx6_pcie_msi_save_restore(imx6_pcie, true);
 		imx6_pcie_pm_turnoff(imx6_pcie);
 		imx6_pcie_stop_link(imx6_pcie->pci);
 		imx6_pcie_host_exit(pp);
@@ -1775,15 +1778,22 @@ static int imx6_pcie_resume_noirq(struct device *dev)
 	if (!(imx6_pcie->drvdata->flags & IMX6_PCIE_FLAG_SUPPORTS_SUSPEND))
 		return 0;
 
-	if (unlikely(imx6_pcie->drvdata->variant == IMX6Q)) {
+	if (imx6_pcie->drvdata->flags & IMX6_PCIE_FLAG_BROKEN_SUSPEND) {
+		ret = imx6_pcie_enable_ref_clk(imx6_pcie);
+		if (ret)
+			return ret;
+		ret = imx6_pcie_deassert_core_reset(imx6_pcie);
+		if (ret)
+			return ret;
 		/*
-		 * L2 can exit by 'reset' or Inband beacon (from remote EP)
-		 * toggling phy_powerdown has same effect as 'inband beacon'
-		 * So, toggle bit18 of GPR1, used as a workaround of errata
-		 * ERR005723 "PCIe PCIe does not support L2 Power Down"
+		 * Using PCIE_TEST_PD seems to disable MSI and powers down the
+		 * root complex. This is why we have to setup the rc again and
+		 * why we have to restore the MSI register.
 		 */
-		regmap_update_bits(imx6_pcie->iomuxc_gpr, IOMUXC_GPR1,
-				IMX6Q_GPR1_PCIE_TEST_PD, 0);
+		ret = dw_pcie_setup_rc(&imx6_pcie->pci->pp);
+		if (ret)
+			return ret;
+		imx6_pcie_msi_save_restore(imx6_pcie, false);
 	} else {
 		ret = imx6_pcie_host_init(pp);
 		if (ret)
@@ -2188,8 +2198,9 @@ static const struct imx6_pcie_drvdata drvdata[] = {
 	[IMX6Q] = {
 		.variant = IMX6Q,
 		.flags = IMX6_PCIE_FLAG_IMX6_PHY |
-			 IMX6_PCIE_FLAG_SUPPORTS_SUSPEND |
-			 IMX6_PCIE_FLAG_IMX6_SPEED_CHANGE,
+			 IMX6_PCIE_FLAG_IMX6_SPEED_CHANGE |
+			 IMX6_PCIE_FLAG_BROKEN_SUSPEND |
+			 IMX6_PCIE_FLAG_SUPPORTS_SUSPEND,
 		.dbi_length = 0x200,
 		.gpr = "fsl,imx6q-iomuxc-gpr",
 	},

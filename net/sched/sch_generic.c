@@ -541,28 +541,43 @@ static void dev_watchdog(struct timer_list *t)
 				dev->netdev_ops->ndo_tx_timeout(dev, i);
 				netif_unfreeze_queues(dev);
 			}
-			if (!mod_timer(&dev->watchdog_timer,
-				       round_jiffies(oldest_start +
-						     dev->watchdog_timeo)))
-				release = false;
+			spin_lock(&dev->watchdog_lock);
+			mod_timer(&dev->watchdog_timer,
+				  round_jiffies(oldest_start +
+						dev->watchdog_timeo));
+			release = false;
+			spin_unlock(&dev->watchdog_lock);
 		}
 	}
 	spin_unlock(&dev->tx_global_lock);
 
-	if (release)
+	spin_lock(&dev->watchdog_lock);
+	if (timer_pending(&dev->watchdog_timer))
+		release = false;
+	if (release && dev->watchdog_ref_held) {
 		netdev_put(dev, &dev->watchdog_dev_tracker);
+		dev->watchdog_ref_held = false;
+	}
+	spin_unlock(&dev->watchdog_lock);
 }
 
 void __netdev_watchdog_up(struct net_device *dev)
 {
-	if (dev->netdev_ops->ndo_tx_timeout) {
-		if (dev->watchdog_timeo <= 0)
-			dev->watchdog_timeo = 5*HZ;
-		if (!mod_timer(&dev->watchdog_timer,
-			       round_jiffies(jiffies + dev->watchdog_timeo)))
+	if (!dev->netdev_ops->ndo_tx_timeout)
+		return;
+	if (dev->watchdog_timeo <= 0)
+		dev->watchdog_timeo = 5*HZ;
+
+	spin_lock_bh(&dev->watchdog_lock);
+	if (!mod_timer(&dev->watchdog_timer,
+		       round_jiffies(jiffies + dev->watchdog_timeo))) {
+		if (!dev->watchdog_ref_held) {
 			netdev_hold(dev, &dev->watchdog_dev_tracker,
 				    GFP_ATOMIC);
+			dev->watchdog_ref_held = true;
+		}
 	}
+	spin_unlock_bh(&dev->watchdog_lock);
 }
 EXPORT_SYMBOL_GPL(__netdev_watchdog_up);
 
@@ -574,8 +589,14 @@ static void dev_watchdog_up(struct net_device *dev)
 static void dev_watchdog_down(struct net_device *dev)
 {
 	netif_tx_lock_bh(dev);
-	if (del_timer(&dev->watchdog_timer))
+
+	spin_lock(&dev->watchdog_lock);
+	if (timer_delete(&dev->watchdog_timer)) {
 		netdev_put(dev, &dev->watchdog_dev_tracker);
+		dev->watchdog_ref_held = false;
+	}
+	spin_unlock(&dev->watchdog_lock);
+
 	netif_tx_unlock_bh(dev);
 }
 
@@ -592,8 +613,6 @@ void netif_carrier_on(struct net_device *dev)
 			return;
 		atomic_inc(&dev->carrier_up_count);
 		linkwatch_fire_event(dev);
-		if (netif_running(dev))
-			__netdev_watchdog_up(dev);
 	}
 }
 EXPORT_SYMBOL(netif_carrier_on);
@@ -708,9 +727,10 @@ struct Qdisc_ops noqueue_qdisc_ops __read_mostly = {
 	.owner		=	THIS_MODULE,
 };
 
-static const u8 prio2band[TC_PRIO_MAX + 1] = {
-	1, 2, 2, 2, 1, 2, 0, 0 , 1, 1, 1, 1, 1, 1, 1, 1
+const u8 sch_default_prio2band[TC_PRIO_MAX + 1] = {
+	1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1
 };
+EXPORT_SYMBOL(sch_default_prio2band);
 
 /* 3-band FIFO queue: old style, but should be a bit faster than
    generic prio+fifo combination.
@@ -735,7 +755,7 @@ static inline struct skb_array *band2list(struct pfifo_fast_priv *priv,
 static int pfifo_fast_enqueue(struct sk_buff *skb, struct Qdisc *qdisc,
 			      struct sk_buff **to_free)
 {
-	int band = prio2band[skb->priority & TC_PRIO_MAX];
+	int band = sch_default_prio2band[skb->priority & TC_PRIO_MAX];
 	struct pfifo_fast_priv *priv = qdisc_priv(qdisc);
 	struct skb_array *q = band2list(priv, band);
 	unsigned int pkt_len = qdisc_pkt_len(skb);
@@ -844,7 +864,7 @@ static int pfifo_fast_dump(struct Qdisc *qdisc, struct sk_buff *skb)
 {
 	struct tc_prio_qopt opt = { .bands = PFIFO_FAST_BANDS };
 
-	memcpy(&opt.priomap, prio2band, TC_PRIO_MAX + 1);
+	memcpy(&opt.priomap, sch_default_prio2band, TC_PRIO_MAX + 1);
 	if (nla_put(skb, TCA_OPTIONS, sizeof(opt), &opt))
 		goto nla_put_failure;
 	return skb->len;

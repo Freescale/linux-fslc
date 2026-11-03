@@ -79,43 +79,43 @@ void dc_dmub_srv_wait_idle(struct dc_dmub_srv *dc_dmub_srv)
 	}
 }
 
-void dc_dmub_srv_clear_inbox0_ack(struct dc_dmub_srv *dmub_srv)
+void dc_dmub_srv_clear_inbox0_ack(struct dc_dmub_srv *dc_dmub_srv)
 {
-	struct dmub_srv *dmub = dmub_srv->dmub;
-	struct dc_context *dc_ctx = dmub_srv->ctx;
+	struct dmub_srv *dmub = dc_dmub_srv->dmub;
+	struct dc_context *dc_ctx = dc_dmub_srv->ctx;
 	enum dmub_status status = DMUB_STATUS_OK;
 
 	status = dmub_srv_clear_inbox0_ack(dmub);
 	if (status != DMUB_STATUS_OK) {
 		DC_ERROR("Error clearing INBOX0 ack: status=%d\n", status);
-		dc_dmub_srv_log_diagnostic_data(dmub_srv);
+		dc_dmub_srv_log_diagnostic_data(dc_dmub_srv);
 	}
 }
 
-void dc_dmub_srv_wait_for_inbox0_ack(struct dc_dmub_srv *dmub_srv)
+void dc_dmub_srv_wait_for_inbox0_ack(struct dc_dmub_srv *dc_dmub_srv)
 {
-	struct dmub_srv *dmub = dmub_srv->dmub;
-	struct dc_context *dc_ctx = dmub_srv->ctx;
+	struct dmub_srv *dmub = dc_dmub_srv->dmub;
+	struct dc_context *dc_ctx = dc_dmub_srv->ctx;
 	enum dmub_status status = DMUB_STATUS_OK;
 
 	status = dmub_srv_wait_for_inbox0_ack(dmub, 100000);
 	if (status != DMUB_STATUS_OK) {
 		DC_ERROR("Error waiting for INBOX0 HW Lock Ack\n");
-		dc_dmub_srv_log_diagnostic_data(dmub_srv);
+		dc_dmub_srv_log_diagnostic_data(dc_dmub_srv);
 	}
 }
 
-void dc_dmub_srv_send_inbox0_cmd(struct dc_dmub_srv *dmub_srv,
-		union dmub_inbox0_data_register data)
+void dc_dmub_srv_send_inbox0_cmd(struct dc_dmub_srv *dc_dmub_srv,
+				 union dmub_inbox0_data_register data)
 {
-	struct dmub_srv *dmub = dmub_srv->dmub;
-	struct dc_context *dc_ctx = dmub_srv->ctx;
+	struct dmub_srv *dmub = dc_dmub_srv->dmub;
+	struct dc_context *dc_ctx = dc_dmub_srv->ctx;
 	enum dmub_status status = DMUB_STATUS_OK;
 
 	status = dmub_srv_send_inbox0_cmd(dmub, data);
 	if (status != DMUB_STATUS_OK) {
 		DC_ERROR("Error sending INBOX0 cmd\n");
-		dc_dmub_srv_log_diagnostic_data(dmub_srv);
+		dc_dmub_srv_log_diagnostic_data(dc_dmub_srv);
 	}
 }
 
@@ -793,7 +793,10 @@ void dc_dmub_srv_log_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv)
 {
 	struct dmub_diagnostic_data diag_data = {0};
 
-	if (!dc_dmub_srv || !dc_dmub_srv->dmub) {
+	if (!dc_dmub_srv)
+		return;
+
+	if (!dc_dmub_srv->dmub) {
 		DC_LOG_ERROR("%s: invalid parameters.", __func__);
 		return;
 	}
@@ -1034,7 +1037,10 @@ void dc_dmub_srv_enable_dpia_trace(const struct dc *dc)
 	enum dmub_status status;
 	static const uint32_t timeout_us = 30;
 
-	if (!dc_dmub_srv || !dc_dmub_srv->dmub) {
+	if (!dc_dmub_srv)
+		return;
+
+	if (!dc_dmub_srv->dmub) {
 		DC_LOG_ERROR("%s: invalid parameters.", __func__);
 		return;
 	}

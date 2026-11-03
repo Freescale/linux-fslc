@@ -938,8 +938,9 @@ static int ublk_map_io(const struct ublk_queue *ubq, const struct request *req,
 		struct iovec iov;
 		const int dir = ITER_DEST;
 
-		import_single_range(dir, u64_to_user_ptr(io->addr), rq_bytes,
-				&iov, &iter);
+		if (import_single_range(dir, u64_to_user_ptr(io->addr), rq_bytes,
+				&iov, &iter) < 0)
+			return 0;
 
 		return ublk_copy_user_pages(req, 0, &iter, dir);
 	}
@@ -962,8 +963,10 @@ static int ublk_unmap_io(const struct ublk_queue *ubq,
 
 		WARN_ON_ONCE(io->res > rq_bytes);
 
-		import_single_range(dir, u64_to_user_ptr(io->addr), io->res,
-				&iov, &iter);
+		if (import_single_range(dir, u64_to_user_ptr(io->addr), io->res,
+				&iov, &iter) < 0)
+			return 0;
+
 		return ublk_copy_user_pages(req, 0, &iter, dir);
 	}
 	return rq_bytes;
@@ -1134,13 +1137,37 @@ exit:
 	ublk_end_request(req, res);
 }
 
-static void ublk_complete_rq(struct kref *ref)
+static void ublk_do_fail_rq(struct request *req)
+{
+	struct ublk_queue *ubq = req->mq_hctx->driver_data;
+
+	if (ublk_queue_can_use_recovery_reissue(ubq))
+		blk_mq_requeue_request(req, false);
+	else
+		__ublk_complete_rq(req);
+}
+
+static void ublk_fail_rq_fn(struct kref *ref)
 {
 	struct ublk_rq_data *data = container_of(ref, struct ublk_rq_data,
 			ref);
 	struct request *req = blk_mq_rq_from_pdu(data);
 
-	__ublk_complete_rq(req);
+	ublk_do_fail_rq(req);
+}
+
+static void ublk_complete_rq(struct kref *ref)
+{
+	struct ublk_rq_data *data = container_of(ref, struct ublk_rq_data,
+			ref);
+	struct request *req = blk_mq_rq_from_pdu(data);
+	struct ublk_queue *ubq = req->mq_hctx->driver_data;
+
+	/* the abort path's reference may be dropped by another holder last */
+	if (ubq->ios[req->tag].flags & UBLK_IO_FLAG_ABORTED)
+		ublk_do_fail_rq(req);
+	else
+		__ublk_complete_rq(req);
 }
 
 /*
@@ -1158,10 +1185,13 @@ static void __ublk_fail_req(struct ublk_queue *ubq, struct ublk_io *io,
 
 	if (!(io->flags & UBLK_IO_FLAG_ABORTED)) {
 		io->flags |= UBLK_IO_FLAG_ABORTED;
-		if (ublk_queue_can_use_recovery_reissue(ubq))
-			blk_mq_requeue_request(req, false);
-		else
-			ublk_put_req_ref(ubq, req);
+		if (ublk_need_req_ref(ubq)) {
+			struct ublk_rq_data *data = blk_mq_rq_to_pdu(req);
+
+			kref_put(&data->ref, ublk_fail_rq_fn);
+		} else {
+			ublk_do_fail_rq(req);
+		}
 	}
 }
 

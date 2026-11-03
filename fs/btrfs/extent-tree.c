@@ -1766,6 +1766,7 @@ static int run_one_delayed_ref(struct btrfs_trans_handle *trans,
 			       struct btrfs_delayed_extent_op *extent_op,
 			       bool insert_reserved)
 {
+	struct btrfs_fs_info *fs_info = trans->fs_info;
 	int ret = 0;
 
 	if (TRANS_ABORTED(trans)) {
@@ -1775,19 +1776,22 @@ static int run_one_delayed_ref(struct btrfs_trans_handle *trans,
 	}
 
 	if (node->type == BTRFS_TREE_BLOCK_REF_KEY ||
-	    node->type == BTRFS_SHARED_BLOCK_REF_KEY)
+	    node->type == BTRFS_SHARED_BLOCK_REF_KEY) {
 		ret = run_delayed_tree_ref(trans, node, extent_op,
 					   insert_reserved);
-	else if (node->type == BTRFS_EXTENT_DATA_REF_KEY ||
-		 node->type == BTRFS_SHARED_DATA_REF_KEY)
+	} else if (node->type == BTRFS_EXTENT_DATA_REF_KEY ||
+		   node->type == BTRFS_SHARED_DATA_REF_KEY) {
 		ret = run_delayed_data_ref(trans, node, extent_op,
 					   insert_reserved);
-	else
-		BUG();
+	} else {
+		ret = -EUCLEAN;
+		btrfs_err(fs_info, "unexpected delayed ref node type: %u", node->type);
+	}
+
 	if (ret && insert_reserved)
 		btrfs_pin_extent(trans, node->bytenr, node->num_bytes, 1);
 	if (ret < 0)
-		btrfs_err(trans->fs_info,
+		btrfs_err(fs_info,
 "failed to run delayed ref for logical %llu num_bytes %llu type %u action %u ref_mod %d: %d",
 			  node->bytenr, node->num_bytes, node->type,
 			  node->action, node->ref_mod, ret);
@@ -1860,28 +1864,33 @@ static int run_and_cleanup_extent_op(struct btrfs_trans_handle *trans,
 	return ret ? ret : 1;
 }
 
-void btrfs_cleanup_ref_head_accounting(struct btrfs_fs_info *fs_info,
+u64 btrfs_cleanup_ref_head_accounting(struct btrfs_fs_info *fs_info,
 				  struct btrfs_delayed_ref_root *delayed_refs,
 				  struct btrfs_delayed_ref_head *head)
 {
-	int nr_items = 1;	/* Dropping this ref head update. */
-
 	/*
 	 * We had csum deletions accounted for in our delayed refs rsv, we need
 	 * to drop the csum leaves for this update from our delayed_refs_rsv.
 	 */
 	if (head->total_ref_mod < 0 && head->is_data) {
+		int nr_csums;
+
 		spin_lock(&delayed_refs->lock);
 		delayed_refs->pending_csums -= head->num_bytes;
 		spin_unlock(&delayed_refs->lock);
-		nr_items += btrfs_csum_bytes_to_leaves(fs_info, head->num_bytes);
+		nr_csums = btrfs_csum_bytes_to_leaves(fs_info, head->num_bytes);
+
+		btrfs_delayed_refs_rsv_release(fs_info, 0, nr_csums);
+
+		return btrfs_calc_delayed_ref_csum_bytes(fs_info, nr_csums);
 	}
 
-	btrfs_delayed_refs_rsv_release(fs_info, nr_items);
+	return 0;
 }
 
 static int cleanup_ref_head(struct btrfs_trans_handle *trans,
-			    struct btrfs_delayed_ref_head *head)
+			    struct btrfs_delayed_ref_head *head,
+			    u64 *bytes_released)
 {
 
 	struct btrfs_fs_info *fs_info = trans->fs_info;
@@ -1926,7 +1935,7 @@ static int cleanup_ref_head(struct btrfs_trans_handle *trans,
 		}
 	}
 
-	btrfs_cleanup_ref_head_accounting(fs_info, delayed_refs, head);
+	*bytes_released += btrfs_cleanup_ref_head_accounting(fs_info, delayed_refs, head);
 
 	trace_run_delayed_ref_head(fs_info, head, 0);
 	btrfs_delayed_ref_unlock(head);
@@ -1968,7 +1977,8 @@ static struct btrfs_delayed_ref_head *btrfs_obtain_ref_head(
 }
 
 static int btrfs_run_delayed_refs_for_head(struct btrfs_trans_handle *trans,
-					   struct btrfs_delayed_ref_head *locked_ref)
+					   struct btrfs_delayed_ref_head *locked_ref,
+					   u64 *bytes_released)
 {
 	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct btrfs_delayed_ref_root *delayed_refs;
@@ -2024,7 +2034,8 @@ static int btrfs_run_delayed_refs_for_head(struct btrfs_trans_handle *trans,
 
 		ret = run_one_delayed_ref(trans, ref, extent_op,
 					  must_insert_reserved);
-
+		btrfs_delayed_refs_rsv_release(fs_info, 1, 0);
+		*bytes_released += btrfs_calc_delayed_ref_bytes(fs_info, 1);
 		btrfs_free_delayed_extent_op(extent_op);
 		if (ret) {
 			unselect_delayed_ref_head(delayed_refs, locked_ref);
@@ -2047,15 +2058,22 @@ static int btrfs_run_delayed_refs_for_head(struct btrfs_trans_handle *trans,
  * Returns -ENOMEM or -EIO on failure and will abort the transaction.
  */
 static noinline int __btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
-					     unsigned long nr)
+					     u64 min_bytes)
 {
 	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct btrfs_delayed_ref_root *delayed_refs;
 	struct btrfs_delayed_ref_head *locked_ref = NULL;
 	int ret;
 	unsigned long count = 0;
+	unsigned long max_count = 0;
+	u64 bytes_processed = 0;
 
 	delayed_refs = &trans->transaction->delayed_refs;
+	if (min_bytes == 0) {
+		max_count = delayed_refs->num_heads_ready;
+		min_bytes = U64_MAX;
+	}
+
 	do {
 		if (!locked_ref) {
 			locked_ref = btrfs_obtain_ref_head(trans);
@@ -2084,7 +2102,7 @@ static noinline int __btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
 		spin_lock(&locked_ref->lock);
 		btrfs_merge_delayed_refs(fs_info, delayed_refs, locked_ref);
 
-		ret = btrfs_run_delayed_refs_for_head(trans, locked_ref);
+		ret = btrfs_run_delayed_refs_for_head(trans, locked_ref, &bytes_processed);
 		if (ret < 0 && ret != -EAGAIN) {
 			/*
 			 * Error, btrfs_run_delayed_refs_for_head already
@@ -2096,7 +2114,7 @@ static noinline int __btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
 			 * Success, perform the usual cleanup of a processed
 			 * head
 			 */
-			ret = cleanup_ref_head(trans, locked_ref);
+			ret = cleanup_ref_head(trans, locked_ref, &bytes_processed);
 			if (ret > 0 ) {
 				/* We dropped our lock, we need to loop. */
 				ret = 0;
@@ -2113,7 +2131,9 @@ static noinline int __btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
 again:
 		locked_ref = NULL;
 		cond_resched();
-	} while ((nr != -1 && count < nr) || locked_ref);
+	} while ((min_bytes != U64_MAX && bytes_processed < min_bytes) ||
+		 (max_count > 0 && count < max_count) ||
+		 locked_ref);
 
 	return 0;
 }
@@ -2162,24 +2182,27 @@ static u64 find_middle(struct rb_root *root)
 #endif
 
 /*
- * this starts processing the delayed reference count updates and
- * extent insertions we have queued up so far.  count can be
- * 0, which means to process everything in the tree at the start
- * of the run (but not newly added entries), or it can be some target
- * number you'd like to process.
+ * Start processing the delayed reference count updates and extent insertions
+ * we have queued up so far.
+ *
+ * @trans:	Transaction handle.
+ * @min_bytes:	How many bytes of delayed references to process. After this
+ *		many bytes we stop processing delayed references if there are
+ *		any more. If 0 it means to run all existing delayed references,
+ *		but not new ones added after running all existing ones.
+ *		Use (u64)-1 (U64_MAX) to run all existing delayed references
+ *		plus any new ones that are added.
  *
  * Returns 0 on success or if called with an aborted transaction
  * Returns <0 on error and aborts the transaction
  */
-int btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
-			   unsigned long count)
+int btrfs_run_delayed_refs(struct btrfs_trans_handle *trans, u64 min_bytes)
 {
 	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct rb_node *node;
 	struct btrfs_delayed_ref_root *delayed_refs;
 	struct btrfs_delayed_ref_head *head;
 	int ret;
-	int run_all = count == (unsigned long)-1;
 
 	/* We'll clean this up in btrfs_cleanup_transaction */
 	if (TRANS_ABORTED(trans))
@@ -2189,20 +2212,17 @@ int btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
 		return 0;
 
 	delayed_refs = &trans->transaction->delayed_refs;
-	if (count == 0)
-		count = delayed_refs->num_heads_ready;
-
 again:
 #ifdef SCRAMBLE_DELAYED_REFS
 	delayed_refs->run_delayed_start = find_middle(&delayed_refs->root);
 #endif
-	ret = __btrfs_run_delayed_refs(trans, count);
+	ret = __btrfs_run_delayed_refs(trans, min_bytes);
 	if (ret < 0) {
 		btrfs_abort_transaction(trans, ret);
 		return ret;
 	}
 
-	if (run_all) {
+	if (min_bytes == U64_MAX) {
 		btrfs_create_pending_block_groups(trans);
 
 		spin_lock(&delayed_refs->lock);
@@ -2868,7 +2888,15 @@ int btrfs_finish_extent_commit(struct btrfs_trans_handle *trans)
 						   block_group->length,
 						   &trimmed);
 
+		/*
+		 * Not strictly necessary to lock, as the block_group should be
+		 * read-only from btrfs_delete_unused_bgs().
+		 */
+		ASSERT(block_group->ro);
+		spin_lock(&fs_info->unused_bgs_lock);
 		list_del_init(&block_group->bg_list);
+		spin_unlock(&fs_info->unused_bgs_lock);
+
 		btrfs_unfreeze_block_group(block_group);
 		btrfs_put_block_group(block_group);
 

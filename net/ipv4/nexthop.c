@@ -92,6 +92,7 @@ __nh_notifier_single_info_init(struct nh_notifier_single_info *nh_info,
 	else if (nh_info->gw_family == AF_INET6)
 		nh_info->ipv6 = nhi->fib_nhc.nhc_gw.ipv6;
 
+	nh_info->id = nhi->nh_parent->id;
 	nh_info->is_reject = nhi->reject_nh;
 	nh_info->is_fdb = nhi->fdb_nh;
 	nh_info->has_encap = !!nhi->fib_nhc.nhc_lwtstate;
@@ -137,7 +138,6 @@ static int nh_notifier_mpath_info_init(struct nh_notifier_info *info,
 		struct nh_info *nhi;
 
 		nhi = rtnl_dereference(nhge->nh->nh_info);
-		info->nh_grp->nh_entries[i].id = nhge->nh->id;
 		info->nh_grp->nh_entries[i].weight = nhge->weight;
 		__nh_notifier_single_info_init(&info->nh_grp->nh_entries[i].nh,
 					       nhi);
@@ -660,6 +660,7 @@ static int nla_put_nh_group(struct sk_buff *skb, struct nh_group *nhg)
 	size_t len = nhg->num_nh * sizeof(*p);
 	struct nlattr *nla;
 	u16 group_type = 0;
+	u16 weight;
 	int i;
 
 	if (nhg->hash_threshold)
@@ -676,9 +677,12 @@ static int nla_put_nh_group(struct sk_buff *skb, struct nh_group *nhg)
 
 	p = nla_data(nla);
 	for (i = 0; i < nhg->num_nh; ++i) {
+		weight = nhg->nh_entries[i].weight - 1;
+
 		*p++ = (struct nexthop_grp) {
 			.id = nhg->nh_entries[i].nh->id,
-			.weight = nhg->nh_entries[i].weight - 1,
+			.weight = weight,
+			.weight_high = weight >> 8,
 		};
 	}
 
@@ -786,7 +790,8 @@ static size_t nh_nlmsg_size_grp(struct nexthop *nh)
 	struct nh_group *nhg = rtnl_dereference(nh->nh_grp);
 	size_t sz = sizeof(struct nexthop_grp) * nhg->num_nh;
 	size_t tot = nla_total_size(sz) +
-		nla_total_size(2); /* NHA_GROUP_TYPE */
+		nla_total_size(2) +	/* NHA_GROUP_TYPE */
+		nla_total_size(0);	/* NHA_FDB */
 
 	if (nhg->resilient)
 		tot += nh_nlmsg_size_grp_res(nhg);
@@ -1062,11 +1067,14 @@ static int nh_check_attr_group(struct net *net,
 
 	nhg = nla_data(tb[NHA_GROUP]);
 	for (i = 0; i < len; ++i) {
-		if (nhg[i].resvd1 || nhg[i].resvd2) {
-			NL_SET_ERR_MSG(extack, "Reserved fields in nexthop_grp must be 0");
+		if (nhg[i].resvd2) {
+			NL_SET_ERR_MSG(extack, "Reserved field in nexthop_grp must be 0");
 			return -EINVAL;
 		}
-		if (nhg[i].weight > 254) {
+		if (nexthop_grp_weight(&nhg[i]) == 0) {
+			/* 0xffff got passed in, representing weight of 0x10000,
+			 * which is too heavy.
+			 */
 			NL_SET_ERR_MSG(extack, "Invalid value for weight");
 			return -EINVAL;
 		}
@@ -1655,9 +1663,9 @@ static void nh_res_table_cancel_upkeep(struct nh_res_table *res_table)
 static void nh_res_group_rebalance(struct nh_group *nhg,
 				   struct nh_res_table *res_table)
 {
-	int prev_upper_bound = 0;
-	int total = 0;
-	int w = 0;
+	u16 prev_upper_bound = 0;
+	u32 total = 0;
+	u32 w = 0;
 	int i;
 
 	INIT_LIST_HEAD(&res_table->uw_nh_entries);
@@ -1667,11 +1675,12 @@ static void nh_res_group_rebalance(struct nh_group *nhg,
 
 	for (i = 0; i < nhg->num_nh; ++i) {
 		struct nh_grp_entry *nhge = &nhg->nh_entries[i];
-		int upper_bound;
+		u16 upper_bound;
+		u64 btw;
 
 		w += nhge->weight;
-		upper_bound = DIV_ROUND_CLOSEST(res_table->num_nh_buckets * w,
-						total);
+		btw = ((u64)res_table->num_nh_buckets) * w;
+		upper_bound = DIV_ROUND_CLOSEST_ULL(btw, total);
 		nhge->res.wants_buckets = upper_bound - prev_upper_bound;
 		prev_upper_bound = upper_bound;
 
@@ -1737,8 +1746,8 @@ static void replace_nexthop_grp_res(struct nh_group *oldg,
 
 static void nh_hthr_group_rebalance(struct nh_group *nhg)
 {
-	int total = 0;
-	int w = 0;
+	u32 total = 0;
+	u32 w = 0;
 	int i;
 
 	for (i = 0; i < nhg->num_nh; ++i)
@@ -1746,7 +1755,7 @@ static void nh_hthr_group_rebalance(struct nh_group *nhg)
 
 	for (i = 0; i < nhg->num_nh; ++i) {
 		struct nh_grp_entry *nhge = &nhg->nh_entries[i];
-		int upper_bound;
+		u32 upper_bound;
 
 		w += nhge->weight;
 		upper_bound = DIV_ROUND_CLOSEST_ULL((u64)w << 31, total) - 1;
@@ -2492,7 +2501,8 @@ static struct nexthop *nexthop_create_group(struct net *net,
 			nhg->has_v4 = true;
 
 		nhg->nh_entries[i].nh = nhe;
-		nhg->nh_entries[i].weight = entry[i].weight + 1;
+		nhg->nh_entries[i].weight = nexthop_grp_weight(&entry[i]);
+
 		list_add(&nhg->nh_entries[i].nh_list, &nhe->grp_list);
 		nhg->nh_entries[i].nh_parent = nh;
 	}
@@ -3061,15 +3071,15 @@ static int rtm_get_nexthop(struct sk_buff *in_skb, struct nlmsghdr *nlh,
 	if (err)
 		return err;
 
-	err = -ENOBUFS;
-	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
-	if (!skb)
-		goto out;
-
 	err = -ENOENT;
 	nh = nexthop_find_by_id(net, id);
 	if (!nh)
-		goto errout_free;
+		goto out;
+
+	err = -ENOBUFS;
+	skb = nlmsg_new(nh_nlmsg_size(nh), GFP_KERNEL);
+	if (!skb)
+		goto out;
 
 	err = nh_fill_node(skb, nh, RTM_NEWNEXTHOP, NETLINK_CB(in_skb).portid,
 			   nlh->nlmsg_seq, 0);

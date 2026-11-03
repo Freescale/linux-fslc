@@ -2356,6 +2356,11 @@ static int amdgpu_device_fw_loading(struct amdgpu_device *adev)
 
 static int amdgpu_device_init_schedulers(struct amdgpu_device *adev)
 {
+	struct drm_sched_init_args args = {
+		.ops = &amdgpu_sched_ops,
+		.timeout_wq = adev->reset_domain->wq,
+		.dev = adev->dev,
+	};
 	long timeout;
 	int r, i;
 
@@ -2381,11 +2386,12 @@ static int amdgpu_device_init_schedulers(struct amdgpu_device *adev)
 			break;
 		}
 
-		r = drm_sched_init(&ring->sched, &amdgpu_sched_ops,
-				   ring->num_hw_submission, 0,
-				   timeout, adev->reset_domain->wq,
-				   ring->sched_score, ring->name,
-				   adev->dev);
+		args.hw_submission = ring->num_hw_submission;
+		args.timeout = timeout;
+		args.score = ring->sched_score;
+		args.name = ring->name;
+
+		r = drm_sched_init(&ring->sched, &args);
 		if (r) {
 			DRM_ERROR("Failed to create scheduler on ring %s.\n",
 				  ring->name);
@@ -3897,8 +3903,7 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 				goto failed;
 			}
 			/* init i2c buses */
-			if (!amdgpu_device_has_dc_support(adev))
-				amdgpu_atombios_i2c_init(adev);
+			amdgpu_i2c_init(adev);
 		}
 	}
 
@@ -4158,14 +4163,15 @@ void amdgpu_device_fini_sw(struct amdgpu_device *adev)
 	amdgpu_reset_fini(adev);
 
 	/* free i2c buses */
-	if (!amdgpu_device_has_dc_support(adev))
-		amdgpu_i2c_fini(adev);
+	amdgpu_i2c_fini(adev);
 
 	if (amdgpu_emu_mode != 1)
 		amdgpu_atombios_fini(adev);
 
-	kfree(adev->bios);
-	adev->bios = NULL;
+	amdgpu_bios_release(adev);
+
+	kfree(adev->fru_info);
+	adev->fru_info = NULL;
 
 	px = amdgpu_device_supports_px(adev_to_drm(adev));
 
@@ -4867,6 +4873,9 @@ int amdgpu_device_mode1_reset(struct amdgpu_device *adev)
 	if (ret)
 		goto mode1_reset_failed;
 
+	/* enable mmio access after mode 1 reset completed */
+	adev->no_hw_access = false;
+
 	amdgpu_device_load_pci_state(adev->pdev);
 	ret = amdgpu_psp_wait_for_bootloader(adev);
 	if (ret)
@@ -4927,6 +4936,18 @@ int amdgpu_device_pre_asic_reset(struct amdgpu_device *adev,
 
 		/* after all hw jobs are reset, hw fence is meaningless, so force_completion */
 		amdgpu_fence_driver_force_completion(ring);
+	}
+
+	/*
+	 * KIQ rings are polling-fence/no_scheduler like MES, so realign their
+	 * fence too (one ring per XCC), otherwise the first post-reset KIQ
+	 * submission polls forever on a stale seq.
+	 */
+	for (i = 0; i < AMDGPU_MAX_GC_INSTANCES; i++) {
+		struct amdgpu_ring *kiq_ring = &adev->gfx.kiq[i].ring;
+
+		if (kiq_ring->fence_drv.initialized && kiq_ring->sched.ready)
+			amdgpu_fence_driver_force_completion(kiq_ring);
 	}
 
 	amdgpu_fence_driver_isr_toggle(adev, false);
@@ -5142,9 +5163,16 @@ int amdgpu_do_asic_reset(struct list_head *device_list_handle,
 				tmp_adev->reset_vram_lost = vram_lost;
 				memset(&tmp_adev->reset_task_info, 0,
 						sizeof(tmp_adev->reset_task_info));
-				if (reset_context->job && reset_context->job->vm)
-					tmp_adev->reset_task_info =
-						reset_context->job->vm->task_info;
+				if (reset_context->job && reset_context->job->vm) {
+					struct amdgpu_task_info *ti;
+					struct amdgpu_vm *vm = reset_context->job->vm;
+
+					ti = amdgpu_vm_get_task_info_vm(vm);
+					if (ti) {
+						tmp_adev->reset_task_info = *ti;
+						amdgpu_vm_put_task_info(ti);
+					}
+				}
 				amdgpu_reset_capture_coredumpm(tmp_adev);
 #endif
 				if (vram_lost) {
@@ -5155,6 +5183,11 @@ int amdgpu_do_asic_reset(struct list_head *device_list_handle,
 				r = amdgpu_device_fw_loading(tmp_adev);
 				if (r)
 					return r;
+
+				r = amdgpu_xcp_restore_partition_mode(
+					tmp_adev->xcp_mgr);
+				if (r)
+					goto out;
 
 				r = amdgpu_device_ip_resume_phase2(tmp_adev);
 				if (r)

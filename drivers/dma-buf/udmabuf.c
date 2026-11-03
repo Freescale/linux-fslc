@@ -146,7 +146,7 @@ static void release_udmabuf(struct dma_buf *buf)
 
 	for (pg = 0; pg < ubuf->pagecount; pg++)
 		put_page(ubuf->pages[pg]);
-	kfree(ubuf->pages);
+	kvfree(ubuf->pages);
 	kfree(ubuf);
 }
 
@@ -233,8 +233,8 @@ static long udmabuf_create(struct miscdevice *device,
 	if (!ubuf->pagecount)
 		goto err;
 
-	ubuf->pages = kmalloc_array(ubuf->pagecount, sizeof(*ubuf->pages),
-				    GFP_KERNEL);
+	ubuf->pages = kvmalloc_array(ubuf->pagecount, sizeof(*ubuf->pages),
+				     GFP_KERNEL);
 	if (!ubuf->pages) {
 		ret = -ENOMEM;
 		goto err;
@@ -285,14 +285,24 @@ static long udmabuf_create(struct miscdevice *device,
 	flags = 0;
 	if (head->flags & UDMABUF_FLAGS_CLOEXEC)
 		flags |= O_CLOEXEC;
-	return dma_buf_fd(buf, flags);
+	/*
+	 * Ownership of ubuf is held by the dmabuf from here.
+	 * If the following dma_buf_fd() fails, dma_buf_put() cleans up both the
+	 * dmabuf and the ubuf (through udmabuf_ops.release).
+	 */
+
+	ret = dma_buf_fd(buf, flags);
+	if (ret < 0)
+		dma_buf_put(buf);
+
+	return ret;
 
 err:
 	while (pgbuf > 0)
 		put_page(ubuf->pages[--pgbuf]);
 	if (memfd)
 		fput(memfd);
-	kfree(ubuf->pages);
+	kvfree(ubuf->pages);
 	kfree(ubuf);
 	return ret;
 }

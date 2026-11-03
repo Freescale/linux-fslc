@@ -2452,6 +2452,7 @@ static int scmi_chan_setup(struct scmi_info *info, struct device_node *of_node,
 
 	cinfo->id = prot_id;
 	cinfo->dev = &tdev->dev;
+	cinfo->handle = &info->handle;
 	ret = info->desc->ops->chan_setup(cinfo, info->dev, tx);
 	if (ret) {
 		of_node_put(of_node);
@@ -2485,7 +2486,6 @@ idr_alloc:
 		return ret;
 	}
 
-	cinfo->handle = &info->handle;
 	return 0;
 }
 
@@ -2833,7 +2833,7 @@ static int scmi_probe(struct platform_device *pdev)
 	/* Setup all channels described in the DT at first */
 	ret = scmi_channels_setup(info);
 	if (ret)
-		goto clear_ida;
+		goto clear_txrx_setup;
 
 	ret = bus_register_notifier(&scmi_bus_type, &info->bus_nb);
 	if (ret)

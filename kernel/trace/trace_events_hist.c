@@ -2379,6 +2379,7 @@ parse_field(struct hist_trigger_data *hist_data, struct trace_event_file *file,
 				*flags |= HIST_FIELD_FL_CPU;
 			} else if (field && field->filter_type == FILTER_STACKTRACE) {
 				*flags |= HIST_FIELD_FL_STACKTRACE;
+				field = NULL;
 			} else {
 				hist_err(tr, HIST_ERR_FIELD_NOT_FOUND,
 					 errpos(field_name));
@@ -6332,11 +6333,17 @@ static struct event_trigger_ops event_hist_trigger_ops = {
 
 static int event_hist_trigger_named_init(struct event_trigger_data *data)
 {
+	int ret;
+
+	ret = event_hist_trigger_init(data->named_data);
+	if (ret < 0)
+		return ret;
+
 	data->ref++;
 
 	save_named_trigger(data->named_data->name, data);
 
-	return event_hist_trigger_init(data->named_data);
+	return 0;
 }
 
 static void event_hist_trigger_named_free(struct event_trigger_data *data)
@@ -6564,12 +6571,6 @@ static int hist_register_trigger(char *glob,
 		data->ops = &event_hist_trigger_named_ops;
 	}
 
-	if (data->ops->init) {
-		ret = data->ops->init(data);
-		if (ret < 0)
-			goto out;
-	}
-
 	if (hist_data->enable_timestamps) {
 		char *clock = hist_data->attrs->clock;
 
@@ -6580,6 +6581,15 @@ static int hist_register_trigger(char *glob,
 		}
 
 		tracing_set_filter_buffering(file->tr, true);
+	}
+
+	if (data->ops->init) {
+		ret = data->ops->init(data);
+		if (ret < 0) {
+			if (hist_data->enable_timestamps)
+				tracing_set_filter_buffering(file->tr, false);
+			goto out;
+		}
 	}
 
 	if (named_data) {
@@ -6599,11 +6609,12 @@ static int hist_trigger_enable(struct event_trigger_data *data,
 
 	update_cond_flag(file);
 
-	if (trace_event_trigger_enable_disable(file, 1) < 0) {
-		list_del_rcu(&data->list);
-		update_cond_flag(file);
+	/*
+	 * On failure the caller undoes the registration, and
+	 * hist_unregister_trigger() can only find the trigger here.
+	 */
+	if (trace_event_trigger_enable_disable(file, 1) < 0)
 		ret--;
-	}
 
 	return ret;
 }
@@ -6681,13 +6692,13 @@ static void hist_unregister_trigger(char *glob,
 		}
 	}
 
-	if (test && test->ops->free)
-		test->ops->free(test);
-
 	if (hist_data->enable_timestamps) {
 		if (!hist_data->remove || test)
 			tracing_set_filter_buffering(file->tr, false);
 	}
+
+	if (test && test->ops->free)
+		test->ops->free(test);
 }
 
 static bool hist_file_check_refs(struct trace_event_file *file)
@@ -6892,6 +6903,8 @@ static int event_hist_trigger_parse(struct event_command *cmd_ops,
 	return ret;
  out_unreg:
 	event_trigger_unregister(cmd_ops, file, glob+1, trigger_data);
+	/* The unregister frees trigger_data, skip out_free */
+	goto out;
  out_free:
 	event_trigger_reset_filter(cmd_ops, trigger_data);
 
