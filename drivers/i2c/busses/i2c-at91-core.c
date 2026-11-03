@@ -258,6 +258,7 @@ static int at91_twi_probe(struct platform_device *pdev)
 
 		pm_runtime_disable(dev->dev);
 		pm_runtime_set_suspended(dev->dev);
+		at91_twi_dma_release(dev);
 
 		return rc;
 	}
@@ -273,6 +274,8 @@ static void at91_twi_remove(struct platform_device *pdev)
 
 	i2c_del_adapter(&dev->adapter);
 	clk_disable_unprepare(dev->clk);
+
+	at91_twi_dma_release(dev);
 
 	pm_runtime_disable(dev->dev);
 	pm_runtime_set_suspended(dev->dev);

@@ -268,7 +268,7 @@ void		  nsm_release(struct nsm_handle *nsm);
  * This is used in garbage collection and resource reclaim
  * A return value != 0 means destroy the lock/block/share
  */
-typedef int	  (*nlm_host_match_fn_t)(void *cur, struct nlm_host *ref);
+typedef int	  (*nlm_host_match_fn_t)(void *owner, struct nlm_host *ref);
 
 /*
  * Server-side lock handling
@@ -375,12 +375,12 @@ static inline int nlm_privileged_requester(const struct svc_rqst *rqstp)
 static inline int nlm_compare_locks(const struct file_lock *fl1,
 				    const struct file_lock *fl2)
 {
-	return file_inode(fl1->fl_file) == file_inode(fl2->fl_file)
-	     && fl1->fl_pid   == fl2->fl_pid
-	     && fl1->fl_owner == fl2->fl_owner
+	return file_inode(fl1->c.flc_file) == file_inode(fl2->c.flc_file)
+	     && fl1->c.flc_pid   == fl2->c.flc_pid
+	     && fl1->c.flc_owner == fl2->c.flc_owner
 	     && fl1->fl_start == fl2->fl_start
 	     && fl1->fl_end   == fl2->fl_end
-	     &&(fl1->fl_type  == fl2->fl_type || fl2->fl_type == F_UNLCK);
+	     &&(fl1->c.flc_type  == fl2->c.flc_type || fl2->c.flc_type == F_UNLCK);
 }
 
 extern const struct lock_manager_operations nlmsvc_lock_operations;

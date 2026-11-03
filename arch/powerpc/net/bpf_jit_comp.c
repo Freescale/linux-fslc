@@ -39,7 +39,7 @@ int bpf_jit_emit_exit_insn(u32 *image, struct codegen_context *ctx, int tmp_reg,
 	return 0;
 }
 
-struct powerpc64_jit_data {
+struct powerpc_jit_data {
 	struct bpf_binary_header *header;
 	u32 *addrs;
 	u8 *image;
@@ -59,7 +59,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 	u8 *image = NULL;
 	u32 *code_base;
 	u32 *addrs;
-	struct powerpc64_jit_data *jit_data;
+	struct powerpc_jit_data *jit_data;
 	struct codegen_context cgctx;
 	int pass;
 	int flen;
@@ -205,7 +205,13 @@ skip_init_ctx:
 
 	bpf_flush_icache(bpf_hdr, (u8 *)bpf_hdr + bpf_hdr->size);
 	if (!fp->is_func || extra_pass) {
-		bpf_jit_binary_lock_ro(bpf_hdr);
+		if (bpf_jit_binary_lock_ro(bpf_hdr)) {
+			bpf_jit_binary_free(bpf_hdr);
+			fp->bpf_func = NULL;
+			fp->jited = 0;
+			fp->jited_len = 0;
+			goto out_addrs;
+		}
 		bpf_prog_fill_jited_linfo(fp, addrs);
 out_addrs:
 		kfree(addrs);

@@ -3568,8 +3568,15 @@ vmentry_fail_vmexit_guest_mode:
 vmentry_fail_vmexit:
 	vmx_switch_vmcs(vcpu, &vmx->vmcs01);
 
-	if (!from_vmentry)
+	if (!from_vmentry) {
+		nested_ept_uninit_mmu_context(vcpu);
 		return NVMX_VMENTRY_VMEXIT;
+	}
+
+	kvm_vcpu_unmap(vcpu, &vmx->nested.apic_access_page_map, false);
+	kvm_vcpu_unmap(vcpu, &vmx->nested.virtual_apic_map, true);
+	kvm_vcpu_unmap(vcpu, &vmx->nested.pi_desc_map, true);
+	vmx->nested.pi_desc = NULL;
 
 	load_vmcs12_host_state(vcpu, vmcs12);
 	vmcs12->vm_exit_reason = exit_reason.full;
@@ -5850,6 +5857,7 @@ static int handle_invvpid(struct kvm_vcpu *vcpu)
 	} operand;
 	u16 vpid02;
 	int r, gpr_index;
+	int cpu;
 
 	if (!(vmx->nested.msrs.secondary_ctls_high &
 	      SECONDARY_EXEC_ENABLE_VPID) ||
@@ -5891,6 +5899,10 @@ static int handle_invvpid(struct kvm_vcpu *vcpu)
 	 * and never explicitly flush vpid01.  INVVPID targets a VPID, not a
 	 * VMCS, and so whether or not the current vmcs12 has VPID enabled is
 	 * irrelevant (and there may not be a loaded vmcs12).
+	 *
+	 * If vmcs02 was last loaded on a different pCPU, then defer the flush
+	 * by invalidating the nested VPID tracking to ensure that KVM performs
+	 * the invalidation on the correct pCPU.
 	 */
 	vpid02 = nested_get_vpid02(vcpu);
 	switch (type) {
@@ -5899,17 +5911,32 @@ static int handle_invvpid(struct kvm_vcpu *vcpu)
 		    is_noncanonical_address(operand.gla, vcpu))
 			return nested_vmx_fail(vcpu,
 				VMXERR_INVALID_OPERAND_TO_INVEPT_INVVPID);
-		vpid_sync_vcpu_addr(vpid02, operand.gla);
+		cpu = get_cpu();
+		if (cpu != vmx->nested.vmcs02.cpu)
+			vmx->nested.last_vpid = 0;
+		else
+			vpid_sync_vcpu_addr(vpid02, operand.gla);
+		put_cpu();
 		break;
 	case VMX_VPID_EXTENT_SINGLE_CONTEXT:
 	case VMX_VPID_EXTENT_SINGLE_NON_GLOBAL:
 		if (!operand.vpid)
 			return nested_vmx_fail(vcpu,
 				VMXERR_INVALID_OPERAND_TO_INVEPT_INVVPID);
-		vpid_sync_context(vpid02);
+		cpu = get_cpu();
+		if (cpu != vmx->nested.vmcs02.cpu)
+			vmx->nested.last_vpid = 0;
+		else
+			vpid_sync_context(vpid02);
+		put_cpu();
 		break;
 	case VMX_VPID_EXTENT_ALL_CONTEXT:
-		vpid_sync_context(vpid02);
+		cpu = get_cpu();
+		if (cpu != vmx->nested.vmcs02.cpu)
+			vmx->nested.last_vpid = 0;
+		else
+			vpid_sync_context(vpid02);
+		put_cpu();
 		break;
 	default:
 		WARN_ON_ONCE(1);

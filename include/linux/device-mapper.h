@@ -357,6 +357,11 @@ struct dm_target {
 	bool discards_supported:1;
 
 	/*
+	 * Set if this target requires stable data during writeback.
+	 */
+	bool needs_stable_writes:1;
+
+	/*
 	 * Set if this target requires that discards be split on
 	 * 'max_discard_sectors' boundaries.
 	 */
