@@ -274,6 +274,7 @@ comment "SoC Audio support for Freescale i.MX boards:"
 
 config SND_SOC_IMX_HDMI_DMA
 	bool
+	depends on ARM
 	select SND_SOC_GENERIC_DMAENGINE_PCM
 	select SND_SOC_IMX_PCM_DMA
 
@@ -398,7 +399,7 @@ config SND_SOC_IMX_PCM512X
 
 config SND_SOC_IMX6QDL_HDMI
 	tristate "SoC Audio support for i.MX6QDL boards with HDMI port"
-	depends on MFD_MXC_HDMI
+	depends on ARM && MFD_MXC_HDMI
 	select SND_SOC_IMX_HDMI_DMA
 	select SND_SOC_FSL_HDMI
 	select SND_SOC_HDMI_CODEC

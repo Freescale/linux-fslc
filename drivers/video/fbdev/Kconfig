@@ -1772,7 +1772,7 @@ config FB_BROADSHEET
 
 config FB_MXS
 	tristate "MXS LCD framebuffer support"
-	depends on FB && (ARCH_MXS || ARCH_MXC)
+	depends on FB && ARM && (ARCH_MXS || ARCH_MXC)
 	select FB_MXC_DISP_FRAMEWORK
 	select FB_CFB_FILLRECT
 	select FB_CFB_COPYAREA

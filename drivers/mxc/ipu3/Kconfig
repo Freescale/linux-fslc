@@ -1,5 +1,6 @@
 config MXC_IPU_V3
 	bool
+	depends on ARM
 
 config MXC_IPU_V3_PRG
 	tristate "i.MX IPUv3 prefetch gasket engine"

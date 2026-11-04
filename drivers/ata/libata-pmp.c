@@ -380,7 +380,8 @@ static int sata_pmp_configure(struct ata_device *dev, int print_info)
 		hpriv.ap = ap;
 		hpriv.port_mmio = ahci_port_base(ap);
 		ata_port_info(ap, "i.MX8QM PMP SNotification polling thread created.\n");
-		kernel_thread(poll_thread, NULL, CLONE_SIGHAND | SIGCHLD);
+		kernel_thread(poll_thread, NULL, "ahci_imx_pmp",
+			      CLONE_SIGHAND | SIGCHLD);
 		hpriv.poll_thread_created = true;
 	}
 #endif

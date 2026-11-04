@@ -63,7 +63,7 @@ config VIDEO_MUX
 
 config VIDEO_MXC_CAPTURE
 	tristate "MXC Video For Linux Video Capture"
-	depends on VIDEO_DEV
+	depends on ARM && ARCH_MXC && VIDEO_DEV
 	help
 	  This is the video4linux2 capture driver based on i.MX video-in module.
 
