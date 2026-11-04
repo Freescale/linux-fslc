@@ -626,6 +626,7 @@ config MFD_IMX_FLEXIO
 
 config MFD_MXC_HDMI
 	tristate "Freescale HDMI Core"
+	depends on ARM && ARCH_MXC
 	select MFD_CORE
 	help
 	  This is the core driver for the Freescale i.MX6 on-chip HDMI.

@@ -793,15 +793,13 @@ eclkg:
 }
 
 
-static int __exit mxc_hdmi_core_remove(struct platform_device *pdev)
+static void __exit mxc_hdmi_core_remove(struct platform_device *pdev)
 {
 	struct mxc_hdmi_data *hdmi_data = platform_get_drvdata(pdev);
 	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 
 	iounmap(hdmi_data->reg_base);
 	release_mem_region(res->start, resource_size(res));
-
-	return 0;
 }
 
 static const struct of_device_id imx_hdmi_dt_ids[] = {
