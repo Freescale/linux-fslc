@@ -14,6 +14,7 @@
 #include <linux/regmap.h>
 #include <linux/clk.h>
 #include <linux/mfd/syscon.h>
+#include <linux/mutex.h>
 #include <soc/imx/gpcv2.h>
 
 #include <dt-bindings/power/imx8mm-power.h>
@@ -37,6 +38,12 @@ struct imx8m_blk_ctrl {
 	struct regmap *noc_regmap;
 	struct imx8m_blk_ctrl_domain *domains;
 	struct genpd_onecell_data onecell_data;
+	/*
+	 * Serializes the blk-ctrl reset/clock sequence across sibling domains;
+	 * their transitions interact through the shared VPUMIX bus domain,
+	 * VPU_NOC and the not-ack-verified ADB400 handshake (ERR050531).
+	 */
+	struct mutex power_lock;
 };
 
 struct imx8m_blk_ctrl_noc_data {
@@ -133,6 +140,8 @@ static int imx8m_blk_ctrl_power_on(struct generic_pm_domain *genpd)
 	struct imx8m_blk_ctrl *bc = domain->bc;
 	int ret;
 
+	guard(mutex)(&bc->power_lock);
+
 	if (!domain->power_dev)
 		return -ENODEV;
 
@@ -200,6 +209,8 @@ static int imx8m_blk_ctrl_power_off(struct generic_pm_domain *genpd)
 	const struct imx8m_blk_ctrl_domain_data *data = domain->data;
 	struct imx8m_blk_ctrl *bc = domain->bc;
 
+	guard(mutex)(&bc->power_lock);
+
 	if (!domain->power_dev)
 		return -ENODEV;
 
@@ -242,6 +253,10 @@ static int imx8m_blk_ctrl_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	bc->dev = dev;
+
+	ret = devm_mutex_init(dev, &bc->power_lock);
+	if (ret)
+		return ret;
 
 	bc_data = of_device_get_match_data(dev);
 
