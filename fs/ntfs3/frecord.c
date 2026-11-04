@@ -3224,7 +3224,8 @@ static bool ni_update_parent(struct ntfs_inode *ni, struct NTFS_DUP_INFO *dup,
 		if (attr) {
 			const struct REPARSE_POINT *rp;
 
-			rp = resident_data_ex(attr, sizeof(struct REPARSE_POINT));
+			rp = resident_data_ex(attr,
+					      sizeof(struct REPARSE_POINT));
 			/* If ATTR_REPARSE exists 'rp' can't be NULL. */
 			if (rp)
 				dup->extend_data = rp->ReparseTag;

@@ -4,6 +4,7 @@ comment "Wave511 vpu driver"
 
 config MXC_VIDEO_WAVE511_CTRL
 	tristate "WAVE511 VPU Ctrl"
+	depends on VIDEO_WAVE_VPU = n
 	help
 	  Wave511 VPU Ctrl is to handle the global region.
 	  It help load the firmware and boot the vcpu,
@@ -14,6 +15,7 @@ config MXC_VIDEO_WAVE511
 	tristate "WAVE511 VPU (Video Processing Unit) Codec IP"
 	depends on V4L_MEM2MEM_DRIVERS
 	depends on ARCH_MXC || COMPILE_TEST
+	depends on VIDEO_WAVE_VPU = n
 	depends on MEDIA_SUPPORT
 	depends on VIDEO_DEV
 	select MEDIA_CONTROLLER

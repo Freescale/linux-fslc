@@ -19,6 +19,7 @@
 #include "io_uring.h"
 #include "tctx.h"
 #include "napi.h"
+#include "cancel.h"
 #include "sqpoll.h"
 
 #define IORING_SQPOLL_CAP_ENTRIES_VALUE 8
@@ -388,6 +389,13 @@ static int io_sq_thread(void *data)
 				 * reordered with the load of the SQ tail
 				 */
 				smp_mb__after_atomic();
+
+				/*
+				 * Nothing gets submitted before the ring is
+				 * enabled, which comes with a wake up.
+				 */
+				if (READ_ONCE(ctx->flags) & IORING_SETUP_R_DISABLED)
+					continue;
 
 				if (io_sqring_entries(ctx)) {
 					needs_sched = false;

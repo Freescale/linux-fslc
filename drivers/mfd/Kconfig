@@ -626,6 +626,7 @@ config MFD_IMX_FLEXIO
 
 config MFD_MXC_HDMI
 	tristate "Freescale HDMI Core"
+	depends on ARM && ARCH_MXC
 	select MFD_CORE
 	help
 	  This is the core driver for the Freescale i.MX6 on-chip HDMI.
@@ -929,7 +930,7 @@ config MFD_MAX14577
 
 config MFD_MAX17135
 	tristate "Maxim MAX17135 EPD PMIC core"
-	depends on I2C
+	depends on ARM && ARCH_MXC && I2C
 
 	help
 	  This is the MAX17135 PMIC support. It includes

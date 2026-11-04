@@ -2630,6 +2630,7 @@ static int mmu_page_zap_pte(struct kvm *kvm, struct kvm_mmu_page *sp,
 			 */
 			if (tdp_enabled && invalid_list &&
 			    child->role.guest_mode &&
+			    !child->root_count &&
 			    !atomic_long_read(&child->parent_ptes.val))
 				return kvm_mmu_prepare_zap_page(kvm, child,
 								invalid_list);
@@ -7374,6 +7375,11 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 	bool flush;
 
 	write_lock(&kvm->mmu_lock);
+
+#ifdef CONFIG_HAVE_KVM_ARCH_GMEM_INVALIDATE
+	if (slot->gmem.file)
+		kvm_arch_gmem_invalidate_range(kvm, &range);
+#endif
 
 	if (zap_all) {
 		__kvm_mmu_zap_all_fast_front_half(kvm);
