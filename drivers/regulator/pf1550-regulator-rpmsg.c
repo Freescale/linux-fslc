@@ -544,13 +544,29 @@ static struct platform_driver pf1550_regulator_driver = {
 	.probe = pf1550_regulator_probe,
 };
 
-static int __init pf1550_rpmsg_init(void)
+static int __init pf1550_init(void)
 {
-	return register_rpmsg_driver(&rpmsg_regulator_driver);
+	int ret;
+
+	ret = register_rpmsg_driver(&rpmsg_regulator_driver);
+	if (ret)
+		return ret;
+
+	ret = platform_driver_register(&pf1550_regulator_driver);
+	if (ret)
+		unregister_rpmsg_driver(&rpmsg_regulator_driver);
+
+	return ret;
 }
 
-module_platform_driver(pf1550_regulator_driver);
-module_init(pf1550_rpmsg_init);
+static void __exit pf1550_exit(void)
+{
+	platform_driver_unregister(&pf1550_regulator_driver);
+	unregister_rpmsg_driver(&rpmsg_regulator_driver);
+}
+
+module_init(pf1550_init);
+module_exit(pf1550_exit);
 
 MODULE_DESCRIPTION("Freescale PF1550 regulator rpmsg driver");
 MODULE_AUTHOR("Robin Gong <yibin.gong@freescale.com>");
