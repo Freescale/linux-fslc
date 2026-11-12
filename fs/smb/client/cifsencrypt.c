@@ -854,7 +854,6 @@ cifs_crypto_secmech_release(struct TCP_Server_Info *server)
 		crypto_free_aead(server->secmech.enc);
 		server->secmech.enc = NULL;
 	}
-
 	if (server->secmech.dec) {
 		crypto_free_aead(server->secmech.dec);
 		server->secmech.dec = NULL;

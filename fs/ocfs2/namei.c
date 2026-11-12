@@ -252,6 +252,7 @@ static int ocfs2_mknod(struct mnt_idmap *idmap,
 	sigset_t oldset;
 	int did_block_signals = 0;
 	struct ocfs2_dentry_lock *dl = NULL;
+	struct ocfs2_acl_state acl_state = { 0 };
 
 	trace_ocfs2_mknod(dir, dentry, dentry->d_name.len, dentry->d_name.name,
 			  (unsigned long long)OCFS2_I(dir)->ip_blkno,
@@ -326,14 +327,13 @@ static int ocfs2_mknod(struct mnt_idmap *idmap,
 		}
 	}
 
-	/* calculate meta data/clusters for setting security and acl xattr */
-	status = ocfs2_calc_xattr_init(dir, parent_fe_bh, mode,
-				       &si, &want_clusters,
-				       &xattr_credits, &want_meta);
-	if (status < 0) {
-		mlog_errno(status);
+	status = ocfs2_acl_init_prepare(inode, dir, parent_fe_bh, &acl_state);
+	if (status < 0)
 		goto leave;
-	}
+
+	/* calculate meta data/clusters for setting security and acl xattr */
+	ocfs2_calc_xattr_init(dir, mode, &si, &want_clusters, &xattr_credits,
+			      &want_meta, &acl_state);
 
 	/* Reserve a cluster if creating an extent based directory. */
 	if (S_ISDIR(mode) && !ocfs2_supports_inline_data(osb)) {
@@ -407,8 +407,8 @@ static int ocfs2_mknod(struct mnt_idmap *idmap,
 		inc_nlink(dir);
 	}
 
-	status = ocfs2_init_acl(handle, inode, dir, new_fe_bh, parent_fe_bh,
-			 meta_ac, data_ac);
+	status = ocfs2_init_acl(handle, inode, new_fe_bh, meta_ac, data_ac,
+				&acl_state);
 
 	if (status < 0) {
 		mlog_errno(status);
@@ -472,6 +472,8 @@ leave:
 	brelse(new_fe_bh);
 	brelse(parent_fe_bh);
 	kfree(si.value);
+
+	ocfs2_acl_init_release(&acl_state);
 
 	ocfs2_free_dir_lookup_result(&lookup);
 
@@ -1340,7 +1342,7 @@ static int ocfs2_rename(struct mnt_idmap *idmap,
 		goto bail;
 	}
 
-	if (S_ISDIR(old_inode->i_mode)) {
+	if (S_ISDIR(old_inode->i_mode) && new_dir != old_dir) {
 		u64 old_inode_parent;
 
 		update_dot_dot = 1;
@@ -1357,8 +1359,7 @@ static int ocfs2_rename(struct mnt_idmap *idmap,
 			goto bail;
 		}
 
-		if (!new_inode && new_dir != old_dir &&
-		    new_dir->i_nlink >= ocfs2_link_max(osb)) {
+		if (!new_inode && new_dir->i_nlink >= ocfs2_link_max(osb)) {
 			status = -EMLINK;
 			goto bail;
 		}
@@ -1601,6 +1602,9 @@ static int ocfs2_rename(struct mnt_idmap *idmap,
 	if (update_dot_dot) {
 		status = ocfs2_update_entry(old_inode, handle,
 					    &old_inode_dot_dot_res, new_dir);
+	}
+
+	if (S_ISDIR(old_inode->i_mode)) {
 		drop_nlink(old_dir);
 		if (new_inode) {
 			drop_nlink(new_inode);

@@ -86,15 +86,28 @@ struct cs_etm_traceid_queue {
 	u64 period_instructions;
 	size_t last_branch_pos;
 	union perf_event *event_buf;
-	struct thread *thread;
-	struct thread *prev_packet_thread;
-	ocsd_ex_level prev_packet_el;
-	ocsd_ex_level el;
 	struct branch_stack *last_branch;
 	struct branch_stack *last_branch_rb;
 	struct cs_etm_packet *prev_packet;
 	struct cs_etm_packet *packet;
 	struct cs_etm_packet_queue packet_queue;
+
+	struct thread *decode_thread;
+	ocsd_ex_level decode_el;
+
+	/*
+	 * The frontend accesses the EL from '[prev_]packet' because it needs
+	 * previous EL for branch and current EL for instruction samples. It's
+	 * not possible to change thread in a single branch sample so no need to
+	 * store or access the thread through the packet.
+	 */
+	struct thread *frontend_thread;
+};
+
+enum cs_etm_format {
+	UNSET,
+	FORMATTED,
+	UNFORMATTED
 };
 
 struct cs_etm_queue {
@@ -103,6 +116,7 @@ struct cs_etm_queue {
 	struct auxtrace_buffer *buffer;
 	unsigned int queue_nr;
 	u8 pending_timestamp_chan_id;
+	enum cs_etm_format format;
 	u64 offset;
 	const unsigned char *buf;
 	size_t buf_len, buf_used;
@@ -283,22 +297,31 @@ static int cs_etm__metadata_set_trace_id(u8 trace_chan_id, u64 *cpu_metadata)
 }
 
 /*
+ * Get a metadata index for a specific cpu from an array.
+ *
+ */
+static int get_cpu_data_idx(struct cs_etm_auxtrace *etm, int cpu)
+{
+	int i;
+
+	for (i = 0; i < etm->num_cpu; i++) {
+		if (etm->metadata[i][CS_ETM_CPU] == (u64)cpu) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/*
  * Get a metadata for a specific cpu from an array.
  *
  */
 static u64 *get_cpu_data(struct cs_etm_auxtrace *etm, int cpu)
 {
-	int i;
-	u64 *metadata = NULL;
+	int idx = get_cpu_data_idx(etm, cpu);
 
-	for (i = 0; i < etm->num_cpu; i++) {
-		if (etm->metadata[i][CS_ETM_CPU] == (u64)cpu) {
-			metadata = etm->metadata[i];
-			break;
-		}
-	}
-
-	return metadata;
+	return (idx != -1) ? etm->metadata[idx] : NULL;
 }
 
 /*
@@ -473,10 +496,13 @@ static int cs_etm__init_traceid_queue(struct cs_etm_queue *etmq,
 
 	queue = &etmq->etm->queues.queue_array[etmq->queue_nr];
 	tidq->trace_chan_id = trace_chan_id;
-	tidq->el = tidq->prev_packet_el = ocsd_EL_unknown;
-	tidq->thread = machine__findnew_thread(&etm->session->machines.host, -1,
+	tidq->decode_el = ocsd_EL_unknown;
+	tidq->frontend_thread = machine__findnew_thread(&etm->session->machines.host, -1,
 					       queue->tid);
-	tidq->prev_packet_thread = machine__idle_thread(&etm->session->machines.host);
+	tidq->decode_thread = machine__findnew_thread(&etm->session->machines.host, -1,
+					       queue->tid);
+	if (!tidq->frontend_thread || !tidq->decode_thread)
+		goto out;
 
 	tidq->packet = zalloc(sizeof(struct cs_etm_packet));
 	if (!tidq->packet)
@@ -511,6 +537,8 @@ out_free:
 	zfree(&tidq->prev_packet);
 	zfree(&tidq->packet);
 out:
+	thread__zput(tidq->frontend_thread);
+	thread__zput(tidq->decode_thread);
 	return rc;
 }
 
@@ -609,21 +637,10 @@ static void cs_etm__packet_swap(struct cs_etm_auxtrace *etm,
 		/*
 		 * Swap PACKET with PREV_PACKET: PACKET becomes PREV_PACKET for
 		 * the next incoming packet.
-		 *
-		 * Threads and exception levels are also tracked for both the
-		 * previous and current packets. This is because the previous
-		 * packet is used for the 'from' IP for branch samples, so the
-		 * thread at that time must also be assigned to that sample.
-		 * Across discontinuity packets the thread can change, so by
-		 * tracking the thread for the previous packet the branch sample
-		 * will have the correct info.
 		 */
 		tmp = tidq->packet;
 		tidq->packet = tidq->prev_packet;
 		tidq->prev_packet = tmp;
-		tidq->prev_packet_el = tidq->el;
-		thread__put(tidq->prev_packet_thread);
-		tidq->prev_packet_thread = thread__get(tidq->thread);
 	}
 }
 
@@ -641,66 +658,80 @@ static void cs_etm__packet_dump(const char *pkt_string)
 }
 
 static void cs_etm__set_trace_param_etmv3(struct cs_etm_trace_params *t_params,
-					  struct cs_etm_auxtrace *etm, int idx,
-					  u32 etmidr)
+					  struct cs_etm_auxtrace *etm, int t_idx,
+					  int m_idx, u32 etmidr)
 {
 	u64 **metadata = etm->metadata;
 
-	t_params[idx].protocol = cs_etm__get_v7_protocol_version(etmidr);
-	t_params[idx].etmv3.reg_ctrl = metadata[idx][CS_ETM_ETMCR];
-	t_params[idx].etmv3.reg_trc_id = metadata[idx][CS_ETM_ETMTRACEIDR];
+	t_params[t_idx].protocol = cs_etm__get_v7_protocol_version(etmidr);
+	t_params[t_idx].etmv3.reg_ctrl = metadata[m_idx][CS_ETM_ETMCR];
+	t_params[t_idx].etmv3.reg_trc_id = metadata[m_idx][CS_ETM_ETMTRACEIDR];
 }
 
 static void cs_etm__set_trace_param_etmv4(struct cs_etm_trace_params *t_params,
-					  struct cs_etm_auxtrace *etm, int idx)
+					  struct cs_etm_auxtrace *etm, int t_idx,
+					  int m_idx)
 {
 	u64 **metadata = etm->metadata;
 
-	t_params[idx].protocol = CS_ETM_PROTO_ETMV4i;
-	t_params[idx].etmv4.reg_idr0 = metadata[idx][CS_ETMV4_TRCIDR0];
-	t_params[idx].etmv4.reg_idr1 = metadata[idx][CS_ETMV4_TRCIDR1];
-	t_params[idx].etmv4.reg_idr2 = metadata[idx][CS_ETMV4_TRCIDR2];
-	t_params[idx].etmv4.reg_idr8 = metadata[idx][CS_ETMV4_TRCIDR8];
-	t_params[idx].etmv4.reg_configr = metadata[idx][CS_ETMV4_TRCCONFIGR];
-	t_params[idx].etmv4.reg_traceidr = metadata[idx][CS_ETMV4_TRCTRACEIDR];
+	t_params[t_idx].protocol = CS_ETM_PROTO_ETMV4i;
+	t_params[t_idx].etmv4.reg_idr0 = metadata[m_idx][CS_ETMV4_TRCIDR0];
+	t_params[t_idx].etmv4.reg_idr1 = metadata[m_idx][CS_ETMV4_TRCIDR1];
+	t_params[t_idx].etmv4.reg_idr2 = metadata[m_idx][CS_ETMV4_TRCIDR2];
+	t_params[t_idx].etmv4.reg_idr8 = metadata[m_idx][CS_ETMV4_TRCIDR8];
+	t_params[t_idx].etmv4.reg_configr = metadata[m_idx][CS_ETMV4_TRCCONFIGR];
+	t_params[t_idx].etmv4.reg_traceidr = metadata[m_idx][CS_ETMV4_TRCTRACEIDR];
 }
 
 static void cs_etm__set_trace_param_ete(struct cs_etm_trace_params *t_params,
-					  struct cs_etm_auxtrace *etm, int idx)
+					  struct cs_etm_auxtrace *etm, int t_idx,
+					  int m_idx)
 {
 	u64 **metadata = etm->metadata;
 
-	t_params[idx].protocol = CS_ETM_PROTO_ETE;
-	t_params[idx].ete.reg_idr0 = metadata[idx][CS_ETE_TRCIDR0];
-	t_params[idx].ete.reg_idr1 = metadata[idx][CS_ETE_TRCIDR1];
-	t_params[idx].ete.reg_idr2 = metadata[idx][CS_ETE_TRCIDR2];
-	t_params[idx].ete.reg_idr8 = metadata[idx][CS_ETE_TRCIDR8];
-	t_params[idx].ete.reg_configr = metadata[idx][CS_ETE_TRCCONFIGR];
-	t_params[idx].ete.reg_traceidr = metadata[idx][CS_ETE_TRCTRACEIDR];
-	t_params[idx].ete.reg_devarch = metadata[idx][CS_ETE_TRCDEVARCH];
+	t_params[t_idx].protocol = CS_ETM_PROTO_ETE;
+	t_params[t_idx].ete.reg_idr0 = metadata[m_idx][CS_ETE_TRCIDR0];
+	t_params[t_idx].ete.reg_idr1 = metadata[m_idx][CS_ETE_TRCIDR1];
+	t_params[t_idx].ete.reg_idr2 = metadata[m_idx][CS_ETE_TRCIDR2];
+	t_params[t_idx].ete.reg_idr8 = metadata[m_idx][CS_ETE_TRCIDR8];
+	t_params[t_idx].ete.reg_configr = metadata[m_idx][CS_ETE_TRCCONFIGR];
+	t_params[t_idx].ete.reg_traceidr = metadata[m_idx][CS_ETE_TRCTRACEIDR];
+	t_params[t_idx].ete.reg_devarch = metadata[m_idx][CS_ETE_TRCDEVARCH];
 }
 
 static int cs_etm__init_trace_params(struct cs_etm_trace_params *t_params,
 				     struct cs_etm_auxtrace *etm,
+				     enum cs_etm_format format,
+				     int sample_cpu,
 				     int decoders)
 {
-	int i;
+	int t_idx, m_idx;
 	u32 etmidr;
 	u64 architecture;
 
-	for (i = 0; i < decoders; i++) {
-		architecture = etm->metadata[i][CS_ETM_MAGIC];
+	for (t_idx = 0; t_idx < decoders; t_idx++) {
+		if (format == FORMATTED)
+			m_idx = t_idx;
+		else {
+			m_idx = get_cpu_data_idx(etm, sample_cpu);
+			if (m_idx == -1) {
+				pr_warning("CS_ETM: unknown CPU, falling back to first metadata\n");
+				m_idx = 0;
+			}
+		}
+
+		architecture = etm->metadata[m_idx][CS_ETM_MAGIC];
 
 		switch (architecture) {
 		case __perf_cs_etmv3_magic:
-			etmidr = etm->metadata[i][CS_ETM_ETMIDR];
-			cs_etm__set_trace_param_etmv3(t_params, etm, i, etmidr);
+			etmidr = etm->metadata[m_idx][CS_ETM_ETMIDR];
+			cs_etm__set_trace_param_etmv3(t_params, etm, t_idx, m_idx, etmidr);
 			break;
 		case __perf_cs_etmv4_magic:
-			cs_etm__set_trace_param_etmv4(t_params, etm, i);
+			cs_etm__set_trace_param_etmv4(t_params, etm, t_idx, m_idx);
 			break;
 		case __perf_cs_ete_magic:
-			cs_etm__set_trace_param_ete(t_params, etm, i);
+			cs_etm__set_trace_param_ete(t_params, etm, t_idx, m_idx);
 			break;
 		default:
 			return -EINVAL;
@@ -712,8 +743,7 @@ static int cs_etm__init_trace_params(struct cs_etm_trace_params *t_params,
 
 static int cs_etm__init_decoder_params(struct cs_etm_decoder_params *d_params,
 				       struct cs_etm_queue *etmq,
-				       enum cs_etm_decoder_operation mode,
-				       bool formatted)
+				       enum cs_etm_decoder_operation mode)
 {
 	int ret = -EINVAL;
 
@@ -723,7 +753,7 @@ static int cs_etm__init_decoder_params(struct cs_etm_decoder_params *d_params,
 	d_params->packet_printer = cs_etm__packet_dump;
 	d_params->operation = mode;
 	d_params->data = etmq;
-	d_params->formatted = formatted;
+	d_params->formatted = etmq->format == FORMATTED;
 	d_params->fsyncs = false;
 	d_params->hsyncs = false;
 	d_params->frame_aligned = true;
@@ -798,8 +828,8 @@ static void cs_etm__free_traceid_queues(struct cs_etm_queue *etmq)
 
 		/* Free this traceid_queue from the array */
 		tidq = etmq->traceid_queues[idx];
-		thread__zput(tidq->thread);
-		thread__zput(tidq->prev_packet_thread);
+		thread__zput(tidq->frontend_thread);
+		thread__zput(tidq->decode_thread);
 		zfree(&tidq->event_buf);
 		zfree(&tidq->last_branch);
 		zfree(&tidq->last_branch_rb);
@@ -940,47 +970,43 @@ static u8 cs_etm__cpu_mode(struct cs_etm_queue *etmq, u64 address,
 	}
 }
 
-static u32 cs_etm__mem_access(struct cs_etm_queue *etmq, u8 trace_chan_id,
-			      u64 address, size_t size, u8 *buffer,
-			      const ocsd_mem_space_acc_t mem_space)
+static u32 __cs_etm__mem_access(struct cs_etm_queue *etmq,
+				u64 address, size_t size, u8 *buffer,
+				const ocsd_mem_space_acc_t mem_space,
+				ocsd_ex_level el, struct thread *thread)
 {
 	u8  cpumode;
 	u64 offset;
 	int len;
 	struct addr_location al;
 	struct dso *dso;
-	struct cs_etm_traceid_queue *tidq;
 	int ret = 0;
 
 	if (!etmq)
 		return 0;
 
 	addr_location__init(&al);
-	tidq = cs_etm__etmq_get_traceid_queue(etmq, trace_chan_id);
-	if (!tidq)
-		goto out;
 
 	/*
-	 * We've already tracked EL along side the PID in cs_etm__set_thread()
-	 * so double check that it matches what OpenCSD thinks as well. It
-	 * doesn't distinguish between EL0 and EL1 for this mem access callback
-	 * so we had to do the extra tracking. Skip validation if it's any of
-	 * the 'any' values.
+	 * We track EL for the frontend and the backend when receiving context
+	 * and range packets. OpenCSD doesn't distinguish between EL0 and EL1
+	 * for this mem access callback so we had to do the extra tracking. Skip
+	 * validation if it's any of the 'any' values.
 	 */
 	if (!(mem_space == OCSD_MEM_SPACE_ANY ||
 	      mem_space == OCSD_MEM_SPACE_N || mem_space == OCSD_MEM_SPACE_S)) {
 		if (mem_space & OCSD_MEM_SPACE_EL1N) {
 			/* Includes both non secure EL1 and EL0 */
-			assert(tidq->el == ocsd_EL1 || tidq->el == ocsd_EL0);
+			assert(el == ocsd_EL1 || el == ocsd_EL0);
 		} else if (mem_space & OCSD_MEM_SPACE_EL2)
-			assert(tidq->el == ocsd_EL2);
+			assert(el == ocsd_EL2);
 		else if (mem_space & OCSD_MEM_SPACE_EL3)
-			assert(tidq->el == ocsd_EL3);
+			assert(el == ocsd_EL3);
 	}
 
-	cpumode = cs_etm__cpu_mode(etmq, address, tidq->el);
+	cpumode = cs_etm__cpu_mode(etmq, address, el);
 
-	if (!thread__find_map(tidq->thread, cpumode, address, &al))
+	if (!thread__find_map(thread, cpumode, address, &al))
 		goto out;
 
 	dso = map__dso(al.map);
@@ -995,7 +1021,7 @@ static u32 cs_etm__mem_access(struct cs_etm_queue *etmq, u8 trace_chan_id,
 
 	map__load(al.map);
 
-	len = dso__data_read_offset(dso, maps__machine(thread__maps(tidq->thread)),
+	len = dso__data_read_offset(dso, maps__machine(thread__maps(thread)),
 				    offset, buffer, size);
 
 	if (len <= 0) {
@@ -1015,80 +1041,58 @@ out:
 	return ret;
 }
 
-static struct cs_etm_queue *cs_etm__alloc_queue(struct cs_etm_auxtrace *etm,
-						bool formatted)
+static u32 cs_etm__frontend_mem_access(struct cs_etm_queue *etmq,
+				       struct cs_etm_traceid_queue *tidq,
+				       struct cs_etm_packet *packet,
+				       u64 address, size_t size, u8 *buffer)
 {
-	struct cs_etm_decoder_params d_params;
-	struct cs_etm_trace_params  *t_params = NULL;
-	struct cs_etm_queue *etmq;
-	/*
-	 * Each queue can only contain data from one CPU when unformatted, so only one decoder is
-	 * needed.
-	 */
-	int decoders = formatted ? etm->num_cpu : 1;
+	return __cs_etm__mem_access(etmq, address, size, buffer, 0, packet->el,
+				    tidq->frontend_thread);
+}
 
-	etmq = zalloc(sizeof(*etmq));
+static u32 cs_etm__decoder_mem_access(struct cs_etm_queue *etmq, u8 trace_chan_id,
+				      u64 address, size_t size, u8 *buffer,
+				      const ocsd_mem_space_acc_t mem_space)
+{
+	struct cs_etm_traceid_queue *tidq;
+
+	tidq = cs_etm__etmq_get_traceid_queue(etmq, trace_chan_id);
+	if (!tidq)
+		return 0;
+
+	return __cs_etm__mem_access(etmq, address, size, buffer,
+				    mem_space, tidq->decode_el,
+				    tidq->decode_thread);
+}
+
+static struct cs_etm_queue *cs_etm__alloc_queue(void)
+{
+	struct cs_etm_queue *etmq = zalloc(sizeof(*etmq));
 	if (!etmq)
 		return NULL;
 
 	etmq->traceid_queues_list = intlist__new(NULL);
 	if (!etmq->traceid_queues_list)
-		goto out_free;
+		free(etmq);
 
-	/* Use metadata to fill in trace parameters for trace decoder */
-	t_params = zalloc(sizeof(*t_params) * decoders);
-
-	if (!t_params)
-		goto out_free;
-
-	if (cs_etm__init_trace_params(t_params, etm, decoders))
-		goto out_free;
-
-	/* Set decoder parameters to decode trace packets */
-	if (cs_etm__init_decoder_params(&d_params, etmq,
-					dump_trace ? CS_ETM_OPERATION_PRINT :
-						     CS_ETM_OPERATION_DECODE,
-					formatted))
-		goto out_free;
-
-	etmq->decoder = cs_etm_decoder__new(decoders, &d_params,
-					    t_params);
-
-	if (!etmq->decoder)
-		goto out_free;
-
-	/*
-	 * Register a function to handle all memory accesses required by
-	 * the trace decoder library.
-	 */
-	if (cs_etm_decoder__add_mem_access_cb(etmq->decoder,
-					      0x0L, ((u64) -1L),
-					      cs_etm__mem_access))
-		goto out_free_decoder;
-
-	zfree(&t_params);
 	return etmq;
-
-out_free_decoder:
-	cs_etm_decoder__free(etmq->decoder);
-out_free:
-	intlist__delete(etmq->traceid_queues_list);
-	free(etmq);
-
-	return NULL;
 }
 
 static int cs_etm__setup_queue(struct cs_etm_auxtrace *etm,
 			       struct auxtrace_queue *queue,
-			       unsigned int queue_nr,
-			       bool formatted)
+			       unsigned int queue_nr, enum cs_etm_format format)
 {
 	struct cs_etm_queue *etmq = queue->priv;
+
+	if (etmq && format != etmq->format) {
+		pr_err("CS_ETM: mixed formatted and unformatted trace not supported\n");
+		return -EINVAL;
+	}
 
 	if (list_empty(&queue->head) || etmq)
 		return 0;
 
-	etmq = cs_etm__alloc_queue(etm, formatted);
+	etmq = cs_etm__alloc_queue();
 
 	if (!etmq)
 		return -ENOMEM;
@@ -1096,7 +1100,9 @@ static int cs_etm__setup_queue(struct cs_etm_auxtrace *etm,
 	queue->priv = etmq;
 	etmq->etm = etm;
 	etmq->queue_nr = queue_nr;
+	queue->cpu = queue_nr; /* Placeholder, may be reset to -1 in per-thread mode */
 	etmq->offset = 0;
+	etmq->format = format;
 
 	return 0;
 }
@@ -1224,12 +1230,13 @@ void cs_etm__reset_last_branch_rb(struct cs_etm_traceid_queue *tidq)
 }
 
 static inline int cs_etm__t32_instr_size(struct cs_etm_queue *etmq,
-					 u8 trace_chan_id, u64 addr)
+					 struct cs_etm_traceid_queue *tidq,
+					 struct cs_etm_packet *packet, u64 addr)
 {
 	u8 instrBytes[2];
 
-	cs_etm__mem_access(etmq, trace_chan_id, addr, ARRAY_SIZE(instrBytes),
-			   instrBytes, 0);
+	cs_etm__frontend_mem_access(etmq, tidq, packet, addr,
+				    ARRAY_SIZE(instrBytes), instrBytes);
 	/*
 	 * T32 instruction size is indicated by bits[15:11] of the first
 	 * 16-bit word of the instruction: 0b11101, 0b11110 and 0b11111
@@ -1258,16 +1265,16 @@ u64 cs_etm__last_executed_instr(const struct cs_etm_packet *packet)
 }
 
 static inline u64 cs_etm__instr_addr(struct cs_etm_queue *etmq,
-				     u64 trace_chan_id,
-				     const struct cs_etm_packet *packet,
+				     struct cs_etm_traceid_queue *tidq,
+				     struct cs_etm_packet *packet,
 				     u64 offset)
 {
 	if (packet->isa == CS_ETM_ISA_T32) {
 		u64 addr = packet->start_addr;
 
 		while (offset) {
-			addr += cs_etm__t32_instr_size(etmq,
-						       trace_chan_id, addr);
+			addr += cs_etm__t32_instr_size(etmq, tidq, packet,
+						       addr);
 			offset--;
 		}
 		return addr;
@@ -1355,38 +1362,54 @@ cs_etm__get_trace(struct cs_etm_queue *etmq)
 	etmq->buf_used = 0;
 	etmq->buf_len = aux_buffer->size;
 	etmq->buf = aux_buffer->data;
-
-	return etmq->buf_len;
+	return 0;
 }
 
-static void cs_etm__set_thread(struct cs_etm_queue *etmq,
-			       struct cs_etm_traceid_queue *tidq, pid_t tid,
-			       ocsd_ex_level el)
+/*
+ * Convert a raw thread number to a thread struct and assign it to **thread.
+ */
+static int cs_etm__etmq_update_thread(struct cs_etm_queue *etmq,
+				      ocsd_ex_level el, pid_t tid,
+				      struct thread **thread)
 {
 	struct machine *machine = cs_etm__get_machine(etmq, el);
 
+	if (!machine || !*thread)
+		return -EINVAL;
+
 	if (tid != -1) {
-		thread__zput(tidq->thread);
-		tidq->thread = machine__find_thread(machine, -1, tid);
+		thread__zput(*thread);
+		*thread = machine__find_thread(machine, -1, tid);
 	}
 
 	/* Couldn't find a known thread */
-	if (!tidq->thread)
-		tidq->thread = machine__idle_thread(machine);
+	if (!*thread)
+		*thread = machine__idle_thread(machine);
 
-	tidq->el = el;
+	return 0;
 }
 
-int cs_etm__etmq_set_tid_el(struct cs_etm_queue *etmq, pid_t tid,
-			    u8 trace_chan_id, ocsd_ex_level el)
+/*
+ * Set the thread and EL of the decode context which is ahead in time of the
+ * frontend context.
+ */
+int cs_etm__etmq_update_decode_context(struct cs_etm_queue *etmq,
+				       u8 trace_chan_id,
+				       ocsd_ex_level el, pid_t tid)
 {
 	struct cs_etm_traceid_queue *tidq;
+	int ret;
 
 	tidq = cs_etm__etmq_get_traceid_queue(etmq, trace_chan_id);
 	if (!tidq)
 		return -EINVAL;
 
-	cs_etm__set_thread(etmq, tidq, tid, el);
+	ret = cs_etm__etmq_update_thread(etmq, el, tid,
+					 &tidq->decode_thread);
+	if (ret)
+		return ret;
+
+	tidq->decode_el = el;
 	return 0;
 }
 
@@ -1396,8 +1419,8 @@ bool cs_etm__etmq_is_timeless(struct cs_etm_queue *etmq)
 }
 
 static void cs_etm__copy_insn(struct cs_etm_queue *etmq,
-			      u64 trace_chan_id,
-			      const struct cs_etm_packet *packet,
+			      struct cs_etm_traceid_queue *tidq,
+			      struct cs_etm_packet *packet,
 			      struct perf_sample *sample)
 {
 	/*
@@ -1414,14 +1437,14 @@ static void cs_etm__copy_insn(struct cs_etm_queue *etmq,
 	 * cs_etm__t32_instr_size().
 	 */
 	if (packet->isa == CS_ETM_ISA_T32)
-		sample->insn_len = cs_etm__t32_instr_size(etmq, trace_chan_id,
+		sample->insn_len = cs_etm__t32_instr_size(etmq, tidq, packet,
 							  sample->ip);
 	/* Otherwise, A64 and A32 instruction size are always 32-bit. */
 	else
 		sample->insn_len = 4;
 
-	cs_etm__mem_access(etmq, trace_chan_id, sample->ip, sample->insn_len,
-			   (void *)sample->insn, 0);
+	cs_etm__frontend_mem_access(etmq, tidq, packet, sample->ip,
+				    sample->insn_len, (void *)sample->insn);
 }
 
 u64 cs_etm__convert_sample_time(struct cs_etm_queue *etmq, u64 cs_timestamp)
@@ -1448,6 +1471,7 @@ static inline u64 cs_etm__resolve_sample_time(struct cs_etm_queue *etmq,
 
 static int cs_etm__synth_instruction_sample(struct cs_etm_queue *etmq,
 					    struct cs_etm_traceid_queue *tidq,
+					    struct cs_etm_packet *packet,
 					    u64 addr, u64 period)
 {
 	int ret = 0;
@@ -1456,23 +1480,23 @@ static int cs_etm__synth_instruction_sample(struct cs_etm_queue *etmq,
 	struct perf_sample sample = {.ip = 0,};
 
 	event->sample.header.type = PERF_RECORD_SAMPLE;
-	event->sample.header.misc = cs_etm__cpu_mode(etmq, addr, tidq->el);
+	event->sample.header.misc = cs_etm__cpu_mode(etmq, addr, packet->el);
 	event->sample.header.size = sizeof(struct perf_event_header);
 
 	/* Set time field based on etm auxtrace config. */
 	sample.time = cs_etm__resolve_sample_time(etmq, tidq);
 
 	sample.ip = addr;
-	sample.pid = thread__pid(tidq->thread);
-	sample.tid = thread__tid(tidq->thread);
+	sample.pid = thread__pid(tidq->frontend_thread);
+	sample.tid = thread__tid(tidq->frontend_thread);
 	sample.id = etmq->etm->instructions_id;
 	sample.stream_id = etmq->etm->instructions_id;
 	sample.period = period;
-	sample.cpu = tidq->packet->cpu;
+	sample.cpu = packet->cpu;
 	sample.flags = tidq->prev_packet->flags;
 	sample.cpumode = event->sample.header.misc;
 
-	cs_etm__copy_insn(etmq, tidq->trace_chan_id, tidq->packet, &sample);
+	cs_etm__copy_insn(etmq, tidq, packet, &sample);
 
 	if (etm->synth_opts.last_branch)
 		sample.branch_stack = tidq->last_branch;
@@ -1516,15 +1540,15 @@ static int cs_etm__synth_branch_sample(struct cs_etm_queue *etmq,
 
 	event->sample.header.type = PERF_RECORD_SAMPLE;
 	event->sample.header.misc = cs_etm__cpu_mode(etmq, ip,
-						     tidq->prev_packet_el);
+						     tidq->prev_packet->el);
 	event->sample.header.size = sizeof(struct perf_event_header);
 
 	/* Set time field based on etm auxtrace config. */
 	sample.time = cs_etm__resolve_sample_time(etmq, tidq);
 
 	sample.ip = ip;
-	sample.pid = thread__pid(tidq->prev_packet_thread);
-	sample.tid = thread__tid(tidq->prev_packet_thread);
+	sample.pid = thread__pid(tidq->frontend_thread);
+	sample.tid = thread__tid(tidq->frontend_thread);
 	sample.addr = cs_etm__first_executed_instr(tidq->packet);
 	sample.id = etmq->etm->branches_id;
 	sample.stream_id = etmq->etm->branches_id;
@@ -1533,8 +1557,7 @@ static int cs_etm__synth_branch_sample(struct cs_etm_queue *etmq,
 	sample.flags = tidq->prev_packet->flags;
 	sample.cpumode = event->sample.header.misc;
 
-	cs_etm__copy_insn(etmq, tidq->trace_chan_id, tidq->prev_packet,
-			  &sample);
+	cs_etm__copy_insn(etmq, tidq, tidq->prev_packet, &sample);
 
 	/*
 	 * perf report cannot handle events without a branch stack
@@ -1687,7 +1710,6 @@ static int cs_etm__sample(struct cs_etm_queue *etmq,
 {
 	struct cs_etm_auxtrace *etm = etmq->etm;
 	int ret;
-	u8 trace_chan_id = tidq->trace_chan_id;
 	u64 instrs_prev;
 
 	/* Get instructions remainder from previous packet */
@@ -1773,10 +1795,10 @@ static int cs_etm__sample(struct cs_etm_queue *etmq,
 			 * been executed, but PC has not advanced to next
 			 * instruction)
 			 */
-			addr = cs_etm__instr_addr(etmq, trace_chan_id,
-						  tidq->packet, offset - 1);
+			addr = cs_etm__instr_addr(etmq, tidq, tidq->packet,
+						  offset - 1);
 			ret = cs_etm__synth_instruction_sample(
-				etmq, tidq, addr,
+				etmq, tidq, tidq->packet, addr,
 				etm->instructions_sample_period);
 			if (ret)
 				return ret;
@@ -1858,7 +1880,7 @@ static int cs_etm__flush(struct cs_etm_queue *etmq,
 		addr = cs_etm__last_executed_instr(tidq->prev_packet);
 
 		err = cs_etm__synth_instruction_sample(
-			etmq, tidq, addr,
+			etmq, tidq, tidq->prev_packet, addr,
 			tidq->period_instructions);
 		if (err)
 			return err;
@@ -1913,7 +1935,7 @@ static int cs_etm__end_block(struct cs_etm_queue *etmq,
 		addr = cs_etm__last_executed_instr(tidq->prev_packet);
 
 		err = cs_etm__synth_instruction_sample(
-			etmq, tidq, addr,
+			etmq, tidq, tidq->prev_packet, addr,
 			tidq->period_instructions);
 		if (err)
 			return err;
@@ -1923,6 +1945,45 @@ static int cs_etm__end_block(struct cs_etm_queue *etmq,
 
 	return 0;
 }
+
+static int cs_etm__flush_stack_cb(struct thread *thread,
+				  void *data __maybe_unused)
+{
+	thread_stack__flush(thread);
+	return 0;
+}
+
+static void cs_etm__flush_machine_stack(struct cs_etm_queue *etmq, pid_t pid)
+{
+	struct machine *machine;
+
+	machine = machines__find(&etmq->etm->session->machines, pid);
+	if (machine)
+		machine__for_each_thread(machine, cs_etm__flush_stack_cb, NULL);
+}
+
+static void cs_etm__flush_all_stack(struct cs_etm_queue *etmq)
+{
+	enum cs_etm_pid_fmt pid_fmt = cs_etm__get_pid_fmt(etmq);
+
+	if (!etmq->etm->synth_opts.last_branch)
+		return;
+
+	switch (pid_fmt) {
+	case CS_ETM_PIDFMT_CTXTID2:
+		/* Clear the guest stack if virtualization is supported */
+		cs_etm__flush_machine_stack(etmq, DEFAULT_GUEST_KERNEL_ID);
+		fallthrough;
+	case CS_ETM_PIDFMT_CTXTID:
+		cs_etm__flush_machine_stack(etmq, HOST_KERNEL_ID);
+		break;
+	case CS_ETM_PIDFMT_NONE:
+	default:
+		break;
+
+	}
+}
+
 /*
  * cs_etm__get_data_block: Fetch a block from the auxtrace_buffer queue
  *			   if need be.
@@ -1934,25 +1995,38 @@ static int cs_etm__get_data_block(struct cs_etm_queue *etmq)
 {
 	int ret;
 
-	if (!etmq->buf_len) {
-		ret = cs_etm__get_trace(etmq);
-		if (ret <= 0)
-			return ret;
-		/*
-		 * We cannot assume consecutive blocks in the data file
-		 * are contiguous, reset the decoder to force re-sync.
-		 */
-		ret = cs_etm_decoder__reset(etmq->decoder);
-		if (ret)
-			return ret;
-	}
+	/* The current block is not finished */
+	if (etmq->buf_len)
+		return 1;
 
-	return etmq->buf_len;
+	ret = cs_etm__get_trace(etmq);
+	if (ret < 0)
+		return ret;
+
+	/* No more buffer to read */
+	if (!etmq->buf_len)
+		return 0;
+
+	/*
+	 * We cannot assume consecutive blocks in the data file
+	 * are contiguous, reset the decoder to force re-sync.
+	 */
+	ret = cs_etm_decoder__reset(etmq->decoder);
+	if (ret)
+		return ret;
+
+	/*
+	 * Since the decoder is reset, this causes a global trace
+	 * discontinuity. Flush all thread stacks.
+	 */
+	cs_etm__flush_all_stack(etmq);
+
+	return 1;
 }
 
-static bool cs_etm__is_svc_instr(struct cs_etm_queue *etmq, u8 trace_chan_id,
-				 struct cs_etm_packet *packet,
-				 u64 end_addr)
+static bool cs_etm__is_svc_instr(struct cs_etm_queue *etmq,
+				 struct cs_etm_traceid_queue *tidq,
+				 struct cs_etm_packet *packet, u64 end_addr)
 {
 	/* Initialise to keep compiler happy */
 	u16 instr16 = 0;
@@ -1974,8 +2048,8 @@ static bool cs_etm__is_svc_instr(struct cs_etm_queue *etmq, u8 trace_chan_id,
 		 * so below only read 2 bytes as instruction size for T32.
 		 */
 		addr = end_addr - 2;
-		cs_etm__mem_access(etmq, trace_chan_id, addr, sizeof(instr16),
-				   (u8 *)&instr16, 0);
+		cs_etm__frontend_mem_access(etmq, tidq, packet, addr,
+					    sizeof(instr16), (u8 *)&instr16);
 		if ((instr16 & 0xFF00) == 0xDF00)
 			return true;
 
@@ -1990,8 +2064,8 @@ static bool cs_etm__is_svc_instr(struct cs_etm_queue *etmq, u8 trace_chan_id,
 		 * +---------+---------+-------------------------+
 		 */
 		addr = end_addr - 4;
-		cs_etm__mem_access(etmq, trace_chan_id, addr, sizeof(instr32),
-				   (u8 *)&instr32, 0);
+		cs_etm__frontend_mem_access(etmq, tidq, packet, addr,
+					    sizeof(instr32), (u8 *)&instr32);
 		if ((instr32 & 0x0F000000) == 0x0F000000 &&
 		    (instr32 & 0xF0000000) != 0xF0000000)
 			return true;
@@ -2007,8 +2081,8 @@ static bool cs_etm__is_svc_instr(struct cs_etm_queue *etmq, u8 trace_chan_id,
 		 * +-----------------------+---------+-----------+
 		 */
 		addr = end_addr - 4;
-		cs_etm__mem_access(etmq, trace_chan_id, addr, sizeof(instr32),
-				   (u8 *)&instr32, 0);
+		cs_etm__frontend_mem_access(etmq, tidq, packet, addr,
+					    sizeof(instr32), (u8 *)&instr32);
 		if ((instr32 & 0xFFE0001F) == 0xd4000001)
 			return true;
 
@@ -2024,7 +2098,6 @@ static bool cs_etm__is_svc_instr(struct cs_etm_queue *etmq, u8 trace_chan_id,
 static bool cs_etm__is_syscall(struct cs_etm_queue *etmq,
 			       struct cs_etm_traceid_queue *tidq, u64 magic)
 {
-	u8 trace_chan_id = tidq->trace_chan_id;
 	struct cs_etm_packet *packet = tidq->packet;
 	struct cs_etm_packet *prev_packet = tidq->prev_packet;
 
@@ -2039,7 +2112,7 @@ static bool cs_etm__is_syscall(struct cs_etm_queue *etmq,
 	 */
 	if (magic == __perf_cs_etmv4_magic) {
 		if (packet->exception_number == CS_ETMV4_EXC_CALL &&
-		    cs_etm__is_svc_instr(etmq, trace_chan_id, prev_packet,
+		    cs_etm__is_svc_instr(etmq, tidq, prev_packet,
 					 prev_packet->end_addr))
 			return true;
 	}
@@ -2077,7 +2150,6 @@ static bool cs_etm__is_sync_exception(struct cs_etm_queue *etmq,
 				      struct cs_etm_traceid_queue *tidq,
 				      u64 magic)
 {
-	u8 trace_chan_id = tidq->trace_chan_id;
 	struct cs_etm_packet *packet = tidq->packet;
 	struct cs_etm_packet *prev_packet = tidq->prev_packet;
 
@@ -2103,7 +2175,7 @@ static bool cs_etm__is_sync_exception(struct cs_etm_queue *etmq,
 		 * (SMC, HVC) are taken as sync exceptions.
 		 */
 		if (packet->exception_number == CS_ETMV4_EXC_CALL &&
-		    !cs_etm__is_svc_instr(etmq, trace_chan_id, prev_packet,
+		    !cs_etm__is_svc_instr(etmq, tidq, prev_packet,
 					  prev_packet->end_addr))
 			return true;
 
@@ -2127,7 +2199,6 @@ static int cs_etm__set_sample_flags(struct cs_etm_queue *etmq,
 {
 	struct cs_etm_packet *packet = tidq->packet;
 	struct cs_etm_packet *prev_packet = tidq->prev_packet;
-	u8 trace_chan_id = tidq->trace_chan_id;
 	u64 magic;
 	int ret;
 
@@ -2208,11 +2279,11 @@ static int cs_etm__set_sample_flags(struct cs_etm_queue *etmq,
 		if (prev_packet->flags == (PERF_IP_FLAG_BRANCH |
 					   PERF_IP_FLAG_RETURN |
 					   PERF_IP_FLAG_INTERRUPT) &&
-		    cs_etm__is_svc_instr(etmq, trace_chan_id,
-					 packet, packet->start_addr))
+		    cs_etm__is_svc_instr(etmq, tidq, packet, packet->start_addr)) {
 			prev_packet->flags = PERF_IP_FLAG_BRANCH |
 					     PERF_IP_FLAG_RETURN |
 					     PERF_IP_FLAG_SYSCALLRET;
+		}
 		break;
 	case CS_ETM_DISCONTINUITY:
 		/*
@@ -2293,6 +2364,7 @@ static int cs_etm__set_sample_flags(struct cs_etm_queue *etmq,
 					     PERF_IP_FLAG_RETURN |
 					     PERF_IP_FLAG_INTERRUPT;
 		break;
+	case CS_ETM_CONTEXT:
 	case CS_ETM_EMPTY:
 	default:
 		break;
@@ -2368,6 +2440,19 @@ static int cs_etm__process_traceid_queue(struct cs_etm_queue *etmq,
 			 */
 			cs_etm__sample(etmq, tidq);
 			break;
+		case CS_ETM_CONTEXT:
+			/*
+			 * Update context but don't swap packet. Keep the
+			 * previous one for branch source address info, if
+			 * tracing the kernel the context packet will be emitted
+			 * between two ranges.
+			 */
+			ret = cs_etm__etmq_update_thread(etmq, tidq->packet->el,
+							 tidq->packet->tid,
+							 &tidq->frontend_thread);
+			if (ret)
+				goto out;
+			break;
 		case CS_ETM_EXCEPTION:
 		case CS_ETM_EXCEPTION_RET:
 			/*
@@ -2396,6 +2481,7 @@ static int cs_etm__process_traceid_queue(struct cs_etm_queue *etmq,
 		}
 	}
 
+out:
 	return ret;
 }
 
@@ -2519,7 +2605,7 @@ static int cs_etm__process_timeless_queues(struct cs_etm_auxtrace *etm,
 			if (!tidq)
 				continue;
 
-			if (tid == -1 || thread__tid(tidq->thread) == tid)
+			if (tid == -1 || thread__tid(tidq->frontend_thread) == tid)
 				cs_etm__run_per_thread_timeless_decoder(etmq);
 		} else
 			cs_etm__run_per_cpu_timeless_decoder(etmq);
@@ -2827,7 +2913,7 @@ static int cs_etm__process_auxtrace_event(struct perf_session *session,
 		 * formatted in piped mode (true).
 		 */
 		err = cs_etm__setup_queue(etm, &etm->queues.queue_array[idx],
-					  idx, true);
+					  idx, FORMATTED);
 		if (err)
 			return err;
 
@@ -2948,7 +3034,7 @@ static int cs_etm__queue_aux_fragment(struct perf_session *session, off_t file_o
 	union perf_event auxtrace_fragment;
 	__u64 aux_offset, aux_size;
 	__u32 idx;
-	bool formatted;
+	enum cs_etm_format format;
 
 	struct cs_etm_auxtrace *etm = container_of(session->auxtrace,
 						   struct cs_etm_auxtrace,
@@ -3031,9 +3117,10 @@ static int cs_etm__queue_aux_fragment(struct perf_session *session, off_t file_o
 			return err;
 
 		idx = auxtrace_event->idx;
-		formatted = !(aux_event->flags & PERF_AUX_FLAG_CORESIGHT_FORMAT_RAW);
-		return cs_etm__setup_queue(etm, &etm->queues.queue_array[idx],
-					   idx, formatted);
+		format = (aux_event->flags & PERF_AUX_FLAG_CORESIGHT_FORMAT_RAW) ?
+				UNFORMATTED : FORMATTED;
+
+		return cs_etm__setup_queue(etm, &etm->queues.queue_array[idx], idx, format);
 	}
 
 	/* Wasn't inside this buffer, but there were no parse errors. 1 == 'not found' */
@@ -3217,6 +3304,84 @@ static int cs_etm__clear_unused_trace_ids_metadata(int num_cpu, u64 **metadata)
 	return 0;
 }
 
+/*
+ * Use the data gathered by the peeks for HW_ID (trace ID mappings) and AUX
+ * (formatted or not) packets to create the decoders.
+ */
+static int cs_etm__create_queue_decoders(struct cs_etm_queue *etmq)
+{
+	struct cs_etm_decoder_params d_params;
+
+	/*
+	 * Each queue can only contain data from one CPU when unformatted, so only one decoder is
+	 * needed.
+	 */
+	int decoders = etmq->format == FORMATTED ? etmq->etm->num_cpu : 1;
+
+	/* Use metadata to fill in trace parameters for trace decoder */
+	struct cs_etm_trace_params  *t_params = zalloc(sizeof(*t_params) * decoders);
+
+	if (!t_params)
+		goto out_free;
+
+	if (cs_etm__init_trace_params(t_params, etmq->etm, etmq->format,
+				      etmq->queue_nr, decoders))
+		goto out_free;
+
+	/* Set decoder parameters to decode trace packets */
+	if (cs_etm__init_decoder_params(&d_params, etmq,
+					dump_trace ? CS_ETM_OPERATION_PRINT :
+						     CS_ETM_OPERATION_DECODE))
+		goto out_free;
+
+	etmq->decoder = cs_etm_decoder__new(decoders, &d_params,
+					    t_params);
+
+	if (!etmq->decoder)
+		goto out_free;
+
+	/*
+	 * Register a function to handle all memory accesses required by
+	 * the trace decoder library.
+	 */
+	if (cs_etm_decoder__add_mem_access_cb(etmq->decoder,
+					      0x0L, ((u64) -1L),
+					      cs_etm__decoder_mem_access))
+		goto out_free_decoder;
+
+	zfree(&t_params);
+	return 0;
+
+out_free_decoder:
+	cs_etm_decoder__free(etmq->decoder);
+out_free:
+	zfree(&t_params);
+	return -EINVAL;
+}
+
+static int cs_etm__create_decoders(struct cs_etm_auxtrace *etm)
+{
+	struct auxtrace_queues *queues = &etm->queues;
+
+	for (unsigned int i = 0; i < queues->nr_queues; i++) {
+		bool empty = list_empty(&queues->queue_array[i].head);
+		struct cs_etm_queue *etmq = queues->queue_array[i].priv;
+		int ret;
+
+		/*
+		 * Don't create decoders for empty queues, mainly because
+		 * etmq->format is unknown for empty queues.
+		 */
+		if (empty)
+			continue;
+
+		ret = cs_etm__create_queue_decoders(etmq);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 int cs_etm__process_auxtrace_info_full(union perf_event *event,
 				       struct perf_session *session)
 {
@@ -3365,6 +3530,10 @@ int cs_etm__process_auxtrace_info_full(union perf_event *event,
 	if (err)
 		goto err_free_queues;
 
+	err = cs_etm__queue_aux_records(session);
+	if (err)
+		goto err_free_queues;
+
 	/*
 	 * Map Trace ID values to CPU metadata.
 	 *
@@ -3387,7 +3556,7 @@ int cs_etm__process_auxtrace_info_full(union perf_event *event,
 	 * flags if present.
 	 */
 
-	/* first scan for AUX_OUTPUT_HW_ID records to map trace ID values to CPU metadata */
+	/* Scan for AUX_OUTPUT_HW_ID records to map trace ID values to CPU metadata */
 	aux_hw_id_found = 0;
 	err = perf_session__peek_events(session, session->header.data_offset,
 					session->header.data_size,
@@ -3405,7 +3574,7 @@ int cs_etm__process_auxtrace_info_full(union perf_event *event,
 	if (err)
 		goto err_free_queues;
 
-	err = cs_etm__queue_aux_records(session);
+	err = cs_etm__create_decoders(etm);
 	if (err)
 		goto err_free_queues;
 

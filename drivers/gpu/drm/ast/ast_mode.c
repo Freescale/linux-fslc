@@ -1976,7 +1976,9 @@ int ast_mode_config_init(struct ast_device *ast)
 
 	drm_mode_config_reset(dev);
 
-	drm_kms_helper_poll_init(dev);
+	ret = drmm_kms_helper_poll_init(dev);
+	if (ret)
+		return ret;
 
 	return 0;
 }

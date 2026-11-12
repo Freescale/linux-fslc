@@ -470,7 +470,6 @@ static int peak_usb_start(struct peak_usb_device *dev)
 				netif_device_detach(dev->netdev);
 
 			usb_unanchor_urb(urb);
-			kfree(buf);
 			usb_free_urb(urb);
 			break;
 		}
@@ -1143,7 +1142,7 @@ static void __exit peak_usb_exit(void)
 	int err;
 
 	/* last chance do send any synchronous commands here */
-	err = driver_for_each_device(&peak_usb_driver.drvwrap.driver, NULL,
+	err = driver_for_each_device(&peak_usb_driver.driver, NULL,
 				     NULL, peak_usb_do_device_exit);
 	if (err)
 		pr_err("%s: failed to stop all can devices (err %d)\n",

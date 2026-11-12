@@ -12,6 +12,7 @@
 struct ksmbd_user *ksmbd_login_user(const char *account)
 {
 	struct ksmbd_login_response *resp;
+	struct ksmbd_login_response_ext *resp_ext = NULL;
 	struct ksmbd_user *user = NULL;
 
 	resp = ksmbd_ipc_login_request(account);
@@ -21,15 +22,31 @@ struct ksmbd_user *ksmbd_login_user(const char *account)
 	if (!(resp->status & KSMBD_USER_FLAG_OK))
 		goto out;
 
-	user = ksmbd_alloc_user(resp);
+	if (resp->status & KSMBD_USER_FLAG_EXTENSION)
+		resp_ext = ksmbd_ipc_login_request_ext(account);
+
+	user = ksmbd_alloc_user(resp, resp_ext);
+	kvfree(resp_ext);
 out:
 	kvfree(resp);
 	return user;
 }
 
-struct ksmbd_user *ksmbd_alloc_user(struct ksmbd_login_response *resp)
+struct ksmbd_user *ksmbd_alloc_user(struct ksmbd_login_response *resp,
+		struct ksmbd_login_response_ext *resp_ext)
 {
-	struct ksmbd_user *user = NULL;
+	struct ksmbd_user *user;
+
+	/*
+	 * resp->hash_sz is a __u16 taken from the mountd IPC login response but
+	 * resp->hash[] is only KSMBD_REQ_MAX_HASH_SZ bytes.  A malformed or
+	 * malicious response can set hash_sz far beyond that (up to 65535),
+	 * making the memcpy() below read past the response object
+	 * (slab-out-of-bounds in ksmbd_alloc_user()).  Reject any oversized
+	 * hash rather than trust the length.
+	 */
+	if (resp->hash_sz > sizeof(resp->hash))
+		return NULL;
 
 	user = kmalloc(sizeof(struct ksmbd_user), GFP_KERNEL);
 	if (!user)
@@ -44,18 +61,36 @@ struct ksmbd_user *ksmbd_alloc_user(struct ksmbd_login_response *resp)
 	if (user->passkey)
 		memcpy(user->passkey, resp->hash, resp->hash_sz);
 
-	if (!user->name || !user->passkey) {
-		kfree(user->name);
-		kfree(user->passkey);
-		kfree(user);
-		user = NULL;
+	user->ngroups = 0;
+	user->sgid = NULL;
+
+	if (!user->name || !user->passkey)
+		goto err_free;
+
+	if (resp_ext) {
+		user->sgid = kmemdup(resp_ext->____payload,
+				     resp_ext->ngroups * sizeof(gid_t),
+				     GFP_KERNEL);
+		if (!user->sgid)
+			goto err_free;
+
+		user->ngroups = resp_ext->ngroups;
+		ksmbd_debug(SMB, "supplementary groups : %d\n", user->ngroups);
 	}
+
 	return user;
+
+err_free:
+	kfree(user->name);
+	kfree(user->passkey);
+	kfree(user);
+	return NULL;
 }
 
 void ksmbd_free_user(struct ksmbd_user *user)
 {
 	ksmbd_ipc_logout_request(user->name, user->flags);
+	kfree(user->sgid);
 	kfree(user->name);
 	kfree(user->passkey);
 	kfree(user);

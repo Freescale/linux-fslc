@@ -75,7 +75,7 @@ MODULE_ALIAS("can-proto-1");
  */
 
 struct uniqframe {
-	int skbcnt;
+	u32 skbcnt;
 	const struct sk_buff *skb;
 	unsigned int join_rx_count;
 };

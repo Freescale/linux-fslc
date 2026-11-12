@@ -1608,7 +1608,8 @@ bool perform_link_training_with_retries(
 				 */
 				bool result;
 				result = cp_psp->funcs.enable_assr(cp_psp->handle, link);
-				if (!result && link->panel_mode != DP_PANEL_MODE_EDP)
+				if (!result && link->panel_mode_initialized &&
+				    link->panel_mode != DP_PANEL_MODE_EDP)
 					panel_mode = DP_PANEL_MODE_DEFAULT;
 			}
 		}
@@ -1683,8 +1684,8 @@ bool perform_link_training_with_retries(
 		if (status == LINK_TRAINING_ABORT) {
 			enum dc_connection_type type = dc_connection_none;
 
-			link_detect_connection_type(link, &type);
-			if (type == dc_connection_none) {
+			if (link_detect_connection_type(link, &type) &&
+			    type == dc_connection_none) {
 				DC_LOG_HW_LINK_TRAINING("%s: Aborting training because sink unplugged\n", __func__);
 				break;
 			}

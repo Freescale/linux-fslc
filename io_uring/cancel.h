@@ -9,6 +9,8 @@ struct io_cancel_data {
 	u8 opcode;
 	u32 flags;
 	int seq;
+	/* io_try_cancel() has found it being run by io-wq, and flagged it */
+	bool running;
 };
 
 int io_async_cancel_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe);
@@ -20,3 +22,13 @@ void init_hash_table(struct io_hash_table *table, unsigned size);
 
 int io_sync_cancel(struct io_ring_ctx *ctx, void __user *arg);
 bool io_cancel_req_match(struct io_kiocb *req, struct io_cancel_data *cd);
+
+static inline bool io_cancel_match_sequence(struct io_kiocb *req, int sequence)
+{
+	if (req->cancel_seq_set && sequence == req->work.cancel_seq)
+		return true;
+
+	req->cancel_seq_set = true;
+	req->work.cancel_seq = sequence;
+	return false;
+}

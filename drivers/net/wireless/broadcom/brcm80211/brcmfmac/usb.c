@@ -1261,6 +1261,7 @@ static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 		ret = -ENOMEM;
 		goto fail;
 	}
+	mutex_init(&bus->bus_reset_lock);
 
 	bus->dev = dev;
 	bus_pub->bus = bus;
@@ -1326,6 +1327,8 @@ brcmf_usb_disconnect_cb(struct brcmf_usbdev_info *devinfo)
 	if (!devinfo)
 		return;
 	brcmf_dbg(USB, "Enter, bus_pub %p\n", devinfo);
+
+	brcmf_bus_cancel_reset_work(devinfo->bus_pub.bus);
 
 	brcmf_detach(devinfo->dev);
 	brcmf_free(devinfo->dev);
@@ -1583,7 +1586,7 @@ static int brcmf_usb_reset_device(struct device *dev, void *notused)
 
 void brcmf_usb_exit(void)
 {
-	struct device_driver *drv = &brcmf_usbdrvr.drvwrap.driver;
+	struct device_driver *drv = &brcmf_usbdrvr.driver;
 	int ret;
 
 	brcmf_dbg(USB, "Enter\n");

@@ -453,7 +453,7 @@ struct pmu {
 	 * context-switches callback
 	 */
 	void (*sched_task)		(struct perf_event_pmu_context *pmu_ctx,
-					bool sched_in);
+					 struct task_struct *task, bool sched_in);
 
 	/*
 	 * Kmem cache of PMU specific data
@@ -786,7 +786,6 @@ struct perf_event {
 	struct irq_work			pending_irq;
 	struct callback_head		pending_task;
 	unsigned int			pending_work;
-	struct rcuwait			pending_work_wait;
 
 	atomic_t			event_limit;
 
@@ -1228,6 +1227,11 @@ static inline void perf_sample_save_callchain(struct perf_sample_data *data,
 					      struct pt_regs *regs)
 {
 	int size = 1;
+
+	if (!(event->attr.sample_type & PERF_SAMPLE_CALLCHAIN))
+		return;
+	if (WARN_ON_ONCE(data->sample_flags & PERF_SAMPLE_CALLCHAIN))
+		return;
 
 	data->callchain = perf_callchain(event, regs);
 	size += data->callchain->nr;

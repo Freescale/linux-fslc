@@ -292,7 +292,11 @@ int br_nf_pre_routing_finish_bridge(struct net *net, struct sock *sk, struct sk_
 				goto free_skb;
 			}
 
-			neigh_hh_bridge(&neigh->hh, skb);
+			if (neigh_hh_bridge(&neigh->hh, skb)) {
+				neigh_release(neigh);
+				goto free_skb;
+			}
+
 			skb->dev = br_indev;
 
 			ret = br_handle_frame_finish(net, sk, skb);
@@ -1286,7 +1290,7 @@ static int br_netfilter_sysctl_init_net(struct net *net)
 static void br_netfilter_sysctl_exit_net(struct net *net,
 					 struct brnf_net *brnet)
 {
-	struct ctl_table *table = brnet->ctl_hdr->ctl_table_arg;
+	const struct ctl_table *table = brnet->ctl_hdr->ctl_table_arg;
 
 	unregister_net_sysctl_table(brnet->ctl_hdr);
 	if (!net_eq(net, &init_net))

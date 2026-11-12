@@ -533,22 +533,15 @@ static void esw_update_vport_addr_list(struct mlx5_eswitch *esw,
 				       struct mlx5_vport *vport, int list_type)
 {
 	bool is_uc = list_type == MLX5_NVPRT_LIST_TYPE_UC;
-	u8 (*mac_list)[ETH_ALEN];
+	u8 (*mac_list)[ETH_ALEN] = NULL;
 	struct l2addr_node *node;
 	struct vport_addr *addr;
 	struct hlist_head *hash;
 	struct hlist_node *tmp;
-	int size;
+	int size = 0;
 	int err;
 	int hi;
 	int i;
-
-	size = is_uc ? MLX5_MAX_UC_PER_VPORT(esw->dev) :
-		       MLX5_MAX_MC_PER_VPORT(esw->dev);
-
-	mac_list = kcalloc(size, ETH_ALEN, GFP_KERNEL);
-	if (!mac_list)
-		return;
 
 	hash = is_uc ? vport->uc_list : vport->mc_list;
 
@@ -561,7 +554,7 @@ static void esw_update_vport_addr_list(struct mlx5_eswitch *esw,
 		goto out;
 
 	err = mlx5_query_nic_vport_mac_list(esw->dev, vport->vport, list_type,
-					    mac_list, &size);
+					    &mac_list, &size);
 	if (err)
 		goto out;
 	esw_debug(esw->dev, "vport[%d] context update %s list size (%d)\n",
@@ -979,13 +972,19 @@ void mlx5_esw_vport_disable(struct mlx5_eswitch *esw, struct mlx5_vport *vport)
 	    (vport->info.ipsec_crypto_enabled || vport->info.ipsec_packet_enabled))
 		esw->enabled_ipsec_vf_count--;
 
+	/* Clear rx-mode before esw_vport_change_handle_locked(): on
+	 * MLX5_VPORT_PROMISC_CHANGE it calls esw_update_vport_mc_promisc()
+	 * when vport->allmulti_rule is set, repopulating mc_list with FDB
+	 * rules that dangle once the FDB is destroyed. NULL allmulti_rule
+	 * here skips that path.
+	 */
+	esw_apply_vport_rx_mode(esw, vport, false, false);
 	/* We don't assume VFs will cleanup after themselves.
 	 * Calling vport change handler while vport is disabled will cleanup
 	 * the vport resources.
 	 */
 	esw_vport_change_handle_locked(vport);
 	vport->enabled_events = 0;
-	esw_apply_vport_rx_mode(esw, vport, false, false);
 	esw_vport_cleanup(esw, vport);
 	esw->enabled_vports--;
 

@@ -30,6 +30,8 @@
 #include "reg_helper.h"
 #include "basics/conversion.h"
 
+#define DC_LOGGER \
+	ctx->logger
 #define DC_LOGGER_INIT(logger)
 
 #define REG(reg)\
@@ -925,7 +927,8 @@ bool hubp2_is_flip_pending(struct hubp *hubp)
 	if (flip_pending)
 		return true;
 
-	if (earliest_inuse_address.grph.addr.quad_part != hubp->request_address.grph.addr.quad_part)
+	if (hubp &&
+	    earliest_inuse_address.grph.addr.quad_part != hubp->request_address.grph.addr.quad_part)
 		return true;
 
 	return false;

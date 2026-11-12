@@ -107,7 +107,7 @@ nouveau_exec_job_submit(struct nouveau_job *job)
 	drm_exec_until_all_locked(exec) {
 		struct drm_gpuva *va;
 
-		drm_gpuva_for_each_va(va, &uvmm->umgr) {
+		drm_gpuvm_for_each_va(va, &uvmm->umgr) {
 			if (unlikely(va == &uvmm->umgr.kernel_alloc_node))
 				continue;
 
@@ -353,10 +353,10 @@ nouveau_exec_ucopy(struct nouveau_exec_job_args *args,
 
 	return 0;
 
-err_free_pushs:
-	u_free(args->push.s);
 err_free_ins:
 	u_free(args->in_sync.s);
+err_free_pushs:
+	u_free(args->push.s);
 	return ret;
 }
 

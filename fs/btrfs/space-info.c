@@ -262,11 +262,9 @@ static int create_space_info_sub_group(struct btrfs_space_info *parent, u64 flag
 	sub_group->parent = parent;
 	sub_group->subgroup_id = id;
 
-	ret = btrfs_sysfs_add_space_info_type(fs_info, sub_group);
-	if (ret) {
-		kfree(sub_group);
+	ret = btrfs_sysfs_add_space_info_type(sub_group);
+	if (ret)
 		parent->sub_group[index] = NULL;
-	}
 	return ret;
 }
 
@@ -291,7 +289,7 @@ static int create_space_info(struct btrfs_fs_info *info, u64 flags)
 			goto out_free;
 	}
 
-	ret = btrfs_sysfs_add_space_info_type(info, space_info);
+	ret = btrfs_sysfs_add_space_info_type(space_info);
 	if (ret)
 		return ret;
 
@@ -603,18 +601,6 @@ static inline u64 calc_reclaim_items_nr(const struct btrfs_fs_info *fs_info,
 	return nr;
 }
 
-static inline u64 calc_delayed_refs_nr(const struct btrfs_fs_info *fs_info,
-				       u64 to_reclaim)
-{
-	const u64 bytes = btrfs_calc_delayed_ref_bytes(fs_info, 1);
-	u64 nr;
-
-	nr = div64_u64(to_reclaim, bytes);
-	if (!nr)
-		nr = 1;
-	return nr;
-}
-
 #define EXTENT_SIZE_PER_ITEM	SZ_256K
 
 /*
@@ -796,10 +782,9 @@ static void flush_space(struct btrfs_fs_info *fs_info,
 			break;
 		}
 		if (state == FLUSH_DELAYED_REFS_NR)
-			nr = calc_delayed_refs_nr(fs_info, num_bytes);
+			btrfs_run_delayed_refs(trans, num_bytes);
 		else
-			nr = 0;
-		btrfs_run_delayed_refs(trans, nr);
+			btrfs_run_delayed_refs(trans, 0);
 		btrfs_end_transaction(trans);
 		break;
 	case ALLOC_CHUNK:
@@ -809,7 +794,7 @@ static void flush_space(struct btrfs_fs_info *fs_info,
 			ret = PTR_ERR(trans);
 			break;
 		}
-		ret = btrfs_chunk_alloc(trans,
+		ret = btrfs_chunk_alloc(trans, space_info,
 				btrfs_get_alloc_profile(fs_info, space_info->flags),
 				(state == ALLOC_CHUNK) ? CHUNK_ALLOC_NO_FORCE :
 					CHUNK_ALLOC_FORCE);

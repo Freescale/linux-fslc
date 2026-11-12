@@ -1308,7 +1308,7 @@ out:
 	/* Once for the lookup reference */
 	btrfs_put_block_group(block_group);
 	if (remove_rsv)
-		btrfs_delayed_refs_rsv_release(fs_info, 1);
+		btrfs_dec_delayed_refs_rsv_bg_updates(fs_info);
 	btrfs_free_path(path);
 	return ret;
 }
@@ -2799,9 +2799,12 @@ void btrfs_create_pending_block_groups(struct btrfs_trans_handle *trans)
 
 		/* Already aborted the transaction if it failed. */
 next:
-		btrfs_delayed_refs_rsv_release(fs_info, 1);
+		btrfs_dec_delayed_refs_rsv_bg_inserts(fs_info);
+
+		spin_lock(&fs_info->unused_bgs_lock);
 		list_del_init(&block_group->bg_list);
 		clear_bit(BLOCK_GROUP_FLAG_NEW, &block_group->runtime_flags);
+		spin_unlock(&fs_info->unused_bgs_lock);
 	}
 	btrfs_trans_release_chunk_metadata(trans);
 }
@@ -2909,8 +2912,7 @@ struct btrfs_block_group *btrfs_make_block_group(struct btrfs_trans_handle *tran
 #endif
 
 	list_add_tail(&cache->bg_list, &trans->new_bgs);
-	trans->delayed_ref_updates++;
-	btrfs_update_delayed_refs_rsv(trans);
+	btrfs_inc_delayed_refs_rsv_bg_inserts(fs_info);
 
 	set_avail_alloc_bits(fs_info, type);
 	return cache;
@@ -2929,6 +2931,7 @@ int btrfs_inc_block_group_ro(struct btrfs_block_group *cache,
 			     bool do_chunk_alloc)
 {
 	struct btrfs_fs_info *fs_info = cache->fs_info;
+	struct btrfs_space_info *space_info = cache->space_info;
 	struct btrfs_trans_handle *trans;
 	struct btrfs_root *root = btrfs_block_group_root(fs_info);
 	u64 alloc_flags;
@@ -2981,7 +2984,7 @@ int btrfs_inc_block_group_ro(struct btrfs_block_group *cache,
 		 */
 		alloc_flags = btrfs_get_alloc_profile(fs_info, cache->flags);
 		if (alloc_flags != cache->flags) {
-			ret = btrfs_chunk_alloc(trans, alloc_flags,
+			ret = btrfs_chunk_alloc(trans, space_info, alloc_flags,
 						CHUNK_ALLOC_FORCE);
 			/*
 			 * ENOSPC is allowed here, we may have enough space
@@ -3009,15 +3012,15 @@ int btrfs_inc_block_group_ro(struct btrfs_block_group *cache,
 	    (cache->flags & BTRFS_BLOCK_GROUP_SYSTEM))
 		goto unlock_out;
 
-	alloc_flags = btrfs_get_alloc_profile(fs_info, cache->space_info->flags);
-	ret = btrfs_chunk_alloc(trans, alloc_flags, CHUNK_ALLOC_FORCE);
+	alloc_flags = btrfs_get_alloc_profile(fs_info, space_info->flags);
+	ret = btrfs_chunk_alloc(trans, space_info, alloc_flags, CHUNK_ALLOC_FORCE);
 	if (ret < 0)
 		goto out;
 	/*
 	 * We have allocated a new chunk. We also need to activate that chunk to
 	 * grant metadata tickets for zoned filesystem.
 	 */
-	ret = btrfs_zoned_activate_one_bg(fs_info, cache->space_info, true);
+	ret = btrfs_zoned_activate_one_bg(space_info, true);
 	if (ret < 0)
 		goto out;
 
@@ -3143,7 +3146,6 @@ static int cache_save_setup(struct btrfs_block_group *block_group,
 			    struct btrfs_path *path)
 {
 	struct btrfs_fs_info *fs_info = block_group->fs_info;
-	struct btrfs_root *root = fs_info->tree_root;
 	struct inode *inode = NULL;
 	struct extent_changeset *data_reserved = NULL;
 	u64 alloc_hint = 0;
@@ -3195,7 +3197,7 @@ again:
 	 * time.
 	 */
 	BTRFS_I(inode)->generation = 0;
-	ret = btrfs_update_inode(trans, root, BTRFS_I(inode));
+	ret = btrfs_update_inode(trans, BTRFS_I(inode));
 	if (ret) {
 		/*
 		 * So theoretically we could recover from this, simply set the
@@ -3462,7 +3464,7 @@ again:
 		if (should_put)
 			btrfs_put_block_group(cache);
 		if (drop_reserve)
-			btrfs_delayed_refs_rsv_release(fs_info, 1);
+			btrfs_dec_delayed_refs_rsv_bg_updates(fs_info);
 		/*
 		 * Avoid blocking other tasks for too long. It might even save
 		 * us from writing caches for block groups that are going to be
@@ -3566,8 +3568,7 @@ int btrfs_write_dirty_block_groups(struct btrfs_trans_handle *trans)
 		cache_save_setup(cache, trans, path);
 
 		if (!ret)
-			ret = btrfs_run_delayed_refs(trans,
-						     (unsigned long) -1);
+			ret = btrfs_run_delayed_refs(trans, U64_MAX);
 
 		if (!ret && cache->disk_cache_state == BTRFS_DC_SETUP) {
 			cache->io_ctl.inode = NULL;
@@ -3610,7 +3611,7 @@ int btrfs_write_dirty_block_groups(struct btrfs_trans_handle *trans)
 		/* If its not on the io list, we need to put the block group */
 		if (should_put)
 			btrfs_put_block_group(cache);
-		btrfs_delayed_refs_rsv_release(fs_info, 1);
+		btrfs_dec_delayed_refs_rsv_bg_updates(fs_info);
 		spin_lock(&cur_trans->dirty_bgs_lock);
 	}
 	spin_unlock(&cur_trans->dirty_bgs_lock);
@@ -3635,12 +3636,12 @@ int btrfs_update_block_group(struct btrfs_trans_handle *trans,
 			     u64 bytenr, u64 num_bytes, bool alloc)
 {
 	struct btrfs_fs_info *info = trans->fs_info;
-	struct btrfs_block_group *cache = NULL;
-	u64 total = num_bytes;
+	struct btrfs_space_info *space_info;
+	struct btrfs_block_group *cache;
 	u64 old_val;
-	u64 byte_in_group;
+	bool reclaim = false;
+	bool bg_already_dirty = true;
 	int factor;
-	int ret = 0;
 
 	/* Block accounting for super block */
 	spin_lock(&info->delalloc_root_lock);
@@ -3652,97 +3653,86 @@ int btrfs_update_block_group(struct btrfs_trans_handle *trans,
 	btrfs_set_super_bytes_used(info->super_copy, old_val);
 	spin_unlock(&info->delalloc_root_lock);
 
-	while (total) {
-		struct btrfs_space_info *space_info;
-		bool reclaim = false;
+	cache = btrfs_lookup_block_group(info, bytenr);
+	if (!cache)
+		return -ENOENT;
 
-		cache = btrfs_lookup_block_group(info, bytenr);
-		if (!cache) {
-			ret = -ENOENT;
-			break;
-		}
-		space_info = cache->space_info;
-		factor = btrfs_bg_type_to_factor(cache->flags);
+	/* An extent can not span multiple block groups. */
+	ASSERT(bytenr + num_bytes <= cache->start + cache->length);
 
-		/*
-		 * If this block group has free space cache written out, we
-		 * need to make sure to load it if we are removing space.  This
-		 * is because we need the unpinning stage to actually add the
-		 * space back to the block group, otherwise we will leak space.
-		 */
-		if (!alloc && !btrfs_block_group_done(cache))
-			btrfs_cache_block_group(cache, true);
+	space_info = cache->space_info;
+	factor = btrfs_bg_type_to_factor(cache->flags);
 
-		byte_in_group = bytenr - cache->start;
-		WARN_ON(byte_in_group > cache->length);
+	/*
+	 * If this block group has free space cache written out, we need to make
+	 * sure to load it if we are removing space.  This is because we need
+	 * the unpinning stage to actually add the space back to the block group,
+	 * otherwise we will leak space.
+	 */
+	if (!alloc && !btrfs_block_group_done(cache))
+		btrfs_cache_block_group(cache, true);
 
-		spin_lock(&space_info->lock);
-		spin_lock(&cache->lock);
+	spin_lock(&space_info->lock);
+	spin_lock(&cache->lock);
 
-		if (btrfs_test_opt(info, SPACE_CACHE) &&
-		    cache->disk_cache_state < BTRFS_DC_CLEAR)
-			cache->disk_cache_state = BTRFS_DC_CLEAR;
+	if (btrfs_test_opt(info, SPACE_CACHE) &&
+	    cache->disk_cache_state < BTRFS_DC_CLEAR)
+		cache->disk_cache_state = BTRFS_DC_CLEAR;
 
-		old_val = cache->used;
-		num_bytes = min(total, cache->length - byte_in_group);
-		if (alloc) {
-			old_val += num_bytes;
-			cache->used = old_val;
-			cache->reserved -= num_bytes;
-			space_info->bytes_reserved -= num_bytes;
-			space_info->bytes_used += num_bytes;
-			space_info->disk_used += num_bytes * factor;
-			spin_unlock(&cache->lock);
-			spin_unlock(&space_info->lock);
-		} else {
-			old_val -= num_bytes;
-			cache->used = old_val;
-			cache->pinned += num_bytes;
-			btrfs_space_info_update_bytes_pinned(info, space_info,
-							     num_bytes);
-			space_info->bytes_used -= num_bytes;
-			space_info->disk_used -= num_bytes * factor;
+	old_val = cache->used;
+	if (alloc) {
+		old_val += num_bytes;
+		cache->used = old_val;
+		cache->reserved -= num_bytes;
+		space_info->bytes_reserved -= num_bytes;
+		space_info->bytes_used += num_bytes;
+		space_info->disk_used += num_bytes * factor;
+		spin_unlock(&cache->lock);
+		spin_unlock(&space_info->lock);
+	} else {
+		old_val -= num_bytes;
+		cache->used = old_val;
+		cache->pinned += num_bytes;
+		btrfs_space_info_update_bytes_pinned(info, space_info, num_bytes);
+		space_info->bytes_used -= num_bytes;
+		space_info->disk_used -= num_bytes * factor;
 
-			reclaim = should_reclaim_block_group(cache, num_bytes);
+		reclaim = should_reclaim_block_group(cache, num_bytes);
 
-			spin_unlock(&cache->lock);
-			spin_unlock(&space_info->lock);
+		spin_unlock(&cache->lock);
+		spin_unlock(&space_info->lock);
 
-			set_extent_bit(&trans->transaction->pinned_extents,
-				       bytenr, bytenr + num_bytes - 1,
-				       EXTENT_DIRTY, NULL);
-		}
-
-		spin_lock(&trans->transaction->dirty_bgs_lock);
-		if (list_empty(&cache->dirty_list)) {
-			list_add_tail(&cache->dirty_list,
-				      &trans->transaction->dirty_bgs);
-			trans->delayed_ref_updates++;
-			btrfs_get_block_group(cache);
-		}
-		spin_unlock(&trans->transaction->dirty_bgs_lock);
-
-		/*
-		 * No longer have used bytes in this block group, queue it for
-		 * deletion. We do this after adding the block group to the
-		 * dirty list to avoid races between cleaner kthread and space
-		 * cache writeout.
-		 */
-		if (!alloc && old_val == 0) {
-			if (!btrfs_test_opt(info, DISCARD_ASYNC))
-				btrfs_mark_bg_unused(cache);
-		} else if (!alloc && reclaim) {
-			btrfs_mark_bg_to_reclaim(cache);
-		}
-
-		btrfs_put_block_group(cache);
-		total -= num_bytes;
-		bytenr += num_bytes;
+		set_extent_bit(&trans->transaction->pinned_extents, bytenr,
+			       bytenr + num_bytes - 1, EXTENT_DIRTY, NULL);
 	}
 
+	spin_lock(&trans->transaction->dirty_bgs_lock);
+	if (list_empty(&cache->dirty_list)) {
+		list_add_tail(&cache->dirty_list, &trans->transaction->dirty_bgs);
+		bg_already_dirty = false;
+		btrfs_get_block_group(cache);
+	}
+	spin_unlock(&trans->transaction->dirty_bgs_lock);
+
+	/*
+	 * No longer have used bytes in this block group, queue it for deletion.
+	 * We do this after adding the block group to the dirty list to avoid
+	 * races between cleaner kthread and space cache writeout.
+	 */
+	if (!alloc && old_val == 0) {
+		if (!btrfs_test_opt(info, DISCARD_ASYNC))
+			btrfs_mark_bg_unused(cache);
+	} else if (!alloc && reclaim) {
+		btrfs_mark_bg_to_reclaim(cache);
+	}
+
+	btrfs_put_block_group(cache);
+
 	/* Modified block groups are accounted for in the delayed_refs_rsv. */
-	btrfs_update_delayed_refs_rsv(trans);
-	return ret;
+	if (!bg_already_dirty)
+		btrfs_inc_delayed_refs_rsv_bg_updates(info);
+
+	return 0;
 }
 
 /*
@@ -3875,8 +3865,15 @@ static int should_alloc_chunk(const struct btrfs_fs_info *fs_info,
 int btrfs_force_chunk_alloc(struct btrfs_trans_handle *trans, u64 type)
 {
 	u64 alloc_flags = btrfs_get_alloc_profile(trans->fs_info, type);
+	struct btrfs_space_info *space_info;
 
-	return btrfs_chunk_alloc(trans, alloc_flags, CHUNK_ALLOC_FORCE);
+	space_info = btrfs_find_space_info(trans->fs_info, type);
+	if (!space_info) {
+		DEBUG_WARN();
+		return -EINVAL;
+	}
+
+	return btrfs_chunk_alloc(trans, space_info, alloc_flags, CHUNK_ALLOC_FORCE);
 }
 
 static struct btrfs_block_group *do_chunk_alloc(struct btrfs_trans_handle *trans, u64 flags)
@@ -4072,6 +4069,8 @@ out:
  *
  * This function, btrfs_chunk_alloc(), belongs to phase 1.
  *
+ * @space_info: specify which space_info the new chunk should belong to.
+ *
  * If @force is CHUNK_ALLOC_FORCE:
  *    - return 1 if it successfully allocates a chunk,
  *    - return errors including -ENOSPC otherwise.
@@ -4080,11 +4079,11 @@ out:
  *    - return 1 if it successfully allocates a chunk,
  *    - return errors including -ENOSPC otherwise.
  */
-int btrfs_chunk_alloc(struct btrfs_trans_handle *trans, u64 flags,
+int btrfs_chunk_alloc(struct btrfs_trans_handle *trans,
+		      struct btrfs_space_info *space_info, u64 flags,
 		      enum btrfs_chunk_alloc_enum force)
 {
 	struct btrfs_fs_info *fs_info = trans->fs_info;
-	struct btrfs_space_info *space_info;
 	struct btrfs_block_group *ret_bg;
 	bool wait_for_alloc = false;
 	bool should_alloc = false;
@@ -4122,9 +4121,6 @@ int btrfs_chunk_alloc(struct btrfs_trans_handle *trans, u64 flags,
 	 */
 	if (flags & BTRFS_BLOCK_GROUP_SYSTEM)
 		return -ENOSPC;
-
-	space_info = btrfs_find_space_info(fs_info, flags);
-	ASSERT(space_info);
 
 	do {
 		spin_lock(&space_info->lock);
@@ -4273,25 +4269,29 @@ static void reserve_chunk_space(struct btrfs_trans_handle *trans,
 		if (IS_ERR(bg)) {
 			ret = PTR_ERR(bg);
 		} else {
+			int activate_ret;
+
 			/*
 			 * We have a new chunk. We also need to activate it for
 			 * zoned filesystem.
 			 */
-			ret = btrfs_zoned_activate_one_bg(fs_info, info, true);
-			if (ret < 0)
-				return;
-
-			/*
-			 * If we fail to add the chunk item here, we end up
-			 * trying again at phase 2 of chunk allocation, at
-			 * btrfs_create_pending_block_groups(). So ignore
-			 * any error here. An ENOSPC here could happen, due to
-			 * the cases described at do_chunk_alloc() - the system
-			 * block group we just created was just turned into RO
-			 * mode by a scrub for example, or a running discard
-			 * temporarily removed its free space entries, etc.
-			 */
-			btrfs_chunk_alloc_add_chunk_item(trans, bg);
+			activate_ret = btrfs_zoned_activate_one_bg(info, true);
+			if (activate_ret < 0) {
+				ret = activate_ret;
+			} else {
+				/*
+				 * If we fail to add the chunk item here, we end
+				 * up trying again at phase 2 of chunk allocation,
+				 * at btrfs_create_pending_block_groups(). So
+				 * ignore any error here. An ENOSPC here could
+				 * happen, due to the cases described at
+				 * do_chunk_alloc() - the system block group we
+				 * just created was just turned into RO mode by a
+				 * scrub for example, or a running discard
+				 * temporarily removed its free space entries, etc.
+				 */
+				btrfs_chunk_alloc_add_chunk_item(trans, bg);
+			}
 		}
 	}
 

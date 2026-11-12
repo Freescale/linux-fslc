@@ -453,7 +453,8 @@ EXPORT_SYMBOL_GPL(cio_commit_config);
 /**
  * cio_update_schib - Perform stsch and update schib if subchannel is valid.
  * @sch: subchannel on which to perform stsch
- * Return zero on success, -ENODEV otherwise.
+ * Return zero on success, -ENODEV if the subchannel is not operational,
+ * -EACCES if the subchannel has no valid device.
  */
 int cio_update_schib(struct subchannel *sch)
 {
@@ -462,10 +463,12 @@ int cio_update_schib(struct subchannel *sch)
 	if (stsch(sch->schid, &schib))
 		return -ENODEV;
 
-	memcpy(&sch->schib, &schib, sizeof(schib));
-
-	if (!css_sch_is_valid(&schib))
+	if (!css_sch_is_valid(&schib)) {
+		memset(&sch->schib, 0, sizeof(sch->schib));
 		return -EACCES;
+	}
+
+	memcpy(&sch->schib, &schib, sizeof(schib));
 
 	return 0;
 }
@@ -550,7 +553,7 @@ static irqreturn_t do_cio_interrupt(int irq, void *dummy)
 		return IRQ_HANDLED;
 	}
 	sch = phys_to_virt(tpi_info->intparm);
-	spin_lock(sch->lock);
+	spin_lock(&sch->lock);
 	/* Store interrupt response block to lowcore. */
 	if (tsch(tpi_info->schid, irb) == 0) {
 		/* Keep subchannel information word up to date. */
@@ -562,7 +565,7 @@ static irqreturn_t do_cio_interrupt(int irq, void *dummy)
 			inc_irq_stat(IRQIO_CIO);
 	} else
 		inc_irq_stat(IRQIO_CIO);
-	spin_unlock(sch->lock);
+	spin_unlock(&sch->lock);
 
 	return IRQ_HANDLED;
 }
@@ -667,7 +670,7 @@ struct subchannel *cio_probe_console(void)
 	if (IS_ERR(sch))
 		return sch;
 
-	lockdep_set_class(sch->lock, &console_sch_key);
+	lockdep_set_class(&sch->lock, &console_sch_key);
 	isc_register(CONSOLE_ISC);
 	sch->config.isc = CONSOLE_ISC;
 	sch->config.intparm = (u32)virt_to_phys(sch);

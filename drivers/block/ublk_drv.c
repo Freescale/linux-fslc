@@ -938,8 +938,9 @@ static int ublk_map_io(const struct ublk_queue *ubq, const struct request *req,
 		struct iovec iov;
 		const int dir = ITER_DEST;
 
-		import_single_range(dir, u64_to_user_ptr(io->addr), rq_bytes,
-				&iov, &iter);
+		if (import_single_range(dir, u64_to_user_ptr(io->addr), rq_bytes,
+				&iov, &iter) < 0)
+			return 0;
 
 		return ublk_copy_user_pages(req, 0, &iter, dir);
 	}
@@ -962,8 +963,10 @@ static int ublk_unmap_io(const struct ublk_queue *ubq,
 
 		WARN_ON_ONCE(io->res > rq_bytes);
 
-		import_single_range(dir, u64_to_user_ptr(io->addr), io->res,
-				&iov, &iter);
+		if (import_single_range(dir, u64_to_user_ptr(io->addr), io->res,
+				&iov, &iter) < 0)
+			return 0;
+
 		return ublk_copy_user_pages(req, 0, &iter, dir);
 	}
 	return rq_bytes;
@@ -1099,8 +1102,14 @@ static inline void __ublk_complete_rq(struct request *req)
 	 *
 	 * Re-read simply for this unlikely case.
 	 */
-	if (unlikely(unmapped_bytes < io->res))
+	if (unlikely(unmapped_bytes < io->res)) {
+		if (unlikely(!unmapped_bytes)) {
+			res = BLK_STS_IOERR;
+			goto exit;
+		}
+
 		io->res = unmapped_bytes;
+	}
 
 	/*
 	 * Run bio->bi_end_io() with softirqs disabled. If the final fput
@@ -1128,13 +1137,37 @@ exit:
 	ublk_end_request(req, res);
 }
 
-static void ublk_complete_rq(struct kref *ref)
+static void ublk_do_fail_rq(struct request *req)
+{
+	struct ublk_queue *ubq = req->mq_hctx->driver_data;
+
+	if (ublk_queue_can_use_recovery_reissue(ubq))
+		blk_mq_requeue_request(req, false);
+	else
+		__ublk_complete_rq(req);
+}
+
+static void ublk_fail_rq_fn(struct kref *ref)
 {
 	struct ublk_rq_data *data = container_of(ref, struct ublk_rq_data,
 			ref);
 	struct request *req = blk_mq_rq_from_pdu(data);
 
-	__ublk_complete_rq(req);
+	ublk_do_fail_rq(req);
+}
+
+static void ublk_complete_rq(struct kref *ref)
+{
+	struct ublk_rq_data *data = container_of(ref, struct ublk_rq_data,
+			ref);
+	struct request *req = blk_mq_rq_from_pdu(data);
+	struct ublk_queue *ubq = req->mq_hctx->driver_data;
+
+	/* the abort path's reference may be dropped by another holder last */
+	if (ubq->ios[req->tag].flags & UBLK_IO_FLAG_ABORTED)
+		ublk_do_fail_rq(req);
+	else
+		__ublk_complete_rq(req);
 }
 
 /*
@@ -1152,10 +1185,13 @@ static void __ublk_fail_req(struct ublk_queue *ubq, struct ublk_io *io,
 
 	if (!(io->flags & UBLK_IO_FLAG_ABORTED)) {
 		io->flags |= UBLK_IO_FLAG_ABORTED;
-		if (ublk_queue_can_use_recovery_reissue(ubq))
-			blk_mq_requeue_request(req, false);
-		else
-			ublk_put_req_ref(ubq, req);
+		if (ublk_need_req_ref(ubq)) {
+			struct ublk_rq_data *data = blk_mq_rq_to_pdu(req);
+
+			kref_put(&data->ref, ublk_fail_rq_fn);
+		} else {
+			ublk_do_fail_rq(req);
+		}
 	}
 }
 
@@ -1436,6 +1472,12 @@ static int ublk_ch_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	if (vma->vm_flags & VM_WRITE)
 		return -EPERM;
+
+	/*
+	 * The per-queue command buffer is kernel-written ABI; prevent
+	 * the daemon from upgrading to writable via mprotect().
+	 */
+	vm_flags_clear(vma, VM_MAYWRITE);
 
 	end = UBLKSRV_CMD_BUF_OFFSET + ub->dev_info.nr_hw_queues * max_sz;
 	if (phys_off < UBLKSRV_CMD_BUF_OFFSET || phys_off >= end)
@@ -2436,6 +2478,15 @@ static int ublk_ctrl_add_dev(struct io_uring_cmd *cmd)
 
 	/* update device id */
 	ub->dev_info.dev_id = ub->ub_number;
+
+	/*
+	 * ->state and ->ublksrv_pid are owned by the driver and only read back
+	 * by userspace, but they come from the copied-in dev_info, so reset
+	 * them. Otherwise a device added with ->state != DEAD looks live while
+	 * ->ub_disk is still NULL.
+	 */
+	ub->dev_info.state = UBLK_S_DEV_DEAD;
+	ub->dev_info.ublksrv_pid = -1;
 
 	/*
 	 * 64bit flags will be copied back to userspace as feature

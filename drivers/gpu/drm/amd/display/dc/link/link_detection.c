@@ -47,6 +47,8 @@
 #include "dm_helpers.h"
 #include "clk_mgr.h"
 
+#define DC_LOGGER \
+	link->ctx->logger
 #define DC_LOGGER_INIT(logger)
 
 #define LINK_INFO(...) \
@@ -322,6 +324,7 @@ static void query_dp_dual_mode_adaptor(
 	bool is_type2_dongle = false;
 	int retry_count = 2;
 	struct dp_hdmi_dongle_signature_data *dongle_signature;
+	struct dc_link *link = ddc->link;
 
 	/* Assume we have no valid DP passive dongle connected */
 	*dongle = DISPLAY_DONGLE_NONE;
@@ -958,8 +961,11 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 			    link->link_enc->features.flags.bits.DP_IS_USB_C == 1) {
 
 				/* if alt mode times out, return false */
-				if (!wait_for_entering_dp_alt_mode(link))
+				if (!wait_for_entering_dp_alt_mode(link)) {
+					if (prev_sink)
+						dc_sink_release(prev_sink);
 					return false;
+				}
 			}
 
 			if (!detect_dp(link, &sink_caps, reason)) {

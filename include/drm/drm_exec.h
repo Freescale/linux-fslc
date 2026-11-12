@@ -71,7 +71,8 @@ drm_exec_obj(struct drm_exec *exec, unsigned long index)
  * @index: unsigned long index for the iteration
  * @obj: the current GEM object
  *
- * Iterate over all the locked GEM objects inside the drm_exec object.
+ * Iterate over all the explicitly locked GEM objects inside the drm_exec
+ * container, except for the contended and implicit prelocked one.
  */
 #define drm_exec_for_each_locked_object(exec, index, obj)		\
 	for ((index) = 0; ((obj) = drm_exec_obj(exec, index)); ++(index))
@@ -83,9 +84,9 @@ drm_exec_obj(struct drm_exec *exec, unsigned long index)
  * @index: unsigned long index for the iteration
  * @obj: the current GEM object
  *
- * Iterate over all the locked GEM objects inside the drm_exec object in
- * reverse locking order. Note that @index may go below zero and wrap,
- * but that will be caught by drm_exec_obj(), returning a NULL object.
+ * Iterate over all the explicitly locked GEM objects inside the drm_exec
+ * container in reverse locking order. Note that @index may go below zero and wrap
+ * around, but that will be caught by drm_exec_obj(), returning a NULL object.
  */
 #define drm_exec_for_each_locked_object_reverse(exec, index, obj)	\
 	for ((index) = (exec)->num_objects - 1;				\

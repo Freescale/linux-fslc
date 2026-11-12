@@ -151,16 +151,8 @@ int btrfs_dirty_pages(struct btrfs_inode *inode, struct page **pages,
 
 	end_of_last_block = start_pos + num_bytes - 1;
 
-	/*
-	 * The pages may have already been dirty, clear out old accounting so
-	 * we can set things up properly
-	 */
-	clear_extent_bit(&inode->io_tree, start_pos, end_of_last_block,
-			 EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
-			 cached);
-
-	err = btrfs_set_extent_delalloc(inode, start_pos, end_of_last_block,
-					extra_bits, cached);
+	err = btrfs_reset_extent_delalloc(inode, start_pos, end_of_last_block,
+					  extra_bits, cached);
 	if (err)
 		return err;
 
@@ -964,70 +956,64 @@ fail:
 
 /*
  * This function locks the extent and properly waits for data=ordered extents
- * to finish before allowing the pages to be modified if need.
+ * to finish before allowing the pages to be modified.
  *
  * The return value:
- * 1 - the extent is locked
- * 0 - the extent is not locked, and everything is OK
+ * 0 - the extent is locked
  * -EAGAIN - need re-prepare the pages
  * the other < 0 number - Something wrong happens
  */
 static noinline int
-lock_and_cleanup_extent_if_need(struct btrfs_inode *inode, struct page **pages,
-				size_t num_pages, loff_t pos,
-				size_t write_bytes,
-				u64 *lockstart, u64 *lockend, bool nowait,
-				struct extent_state **cached_state)
+lock_and_cleanup_extent(struct btrfs_inode *inode, struct page **pages,
+			size_t num_pages, loff_t pos,
+			size_t write_bytes,
+			u64 *lockstart, u64 *lockend, bool nowait,
+			struct extent_state **cached_state)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
+	struct btrfs_ordered_extent *ordered;
 	u64 start_pos;
 	u64 last_pos;
 	int i;
-	int ret = 0;
 
 	start_pos = round_down(pos, fs_info->sectorsize);
 	last_pos = round_up(pos + write_bytes, fs_info->sectorsize) - 1;
 
-	if (start_pos < inode->vfs_inode.i_size) {
-		struct btrfs_ordered_extent *ordered;
-
-		if (nowait) {
-			if (!try_lock_extent(&inode->io_tree, start_pos, last_pos,
-					     cached_state)) {
-				for (i = 0; i < num_pages; i++) {
-					unlock_page(pages[i]);
-					put_page(pages[i]);
-					pages[i] = NULL;
-				}
-
-				return -EAGAIN;
-			}
-		} else {
-			lock_extent(&inode->io_tree, start_pos, last_pos, cached_state);
-		}
-
-		ordered = btrfs_lookup_ordered_range(inode, start_pos,
-						     last_pos - start_pos + 1);
-		if (ordered &&
-		    ordered->file_offset + ordered->num_bytes > start_pos &&
-		    ordered->file_offset <= last_pos) {
-			unlock_extent(&inode->io_tree, start_pos, last_pos,
-				      cached_state);
+	if (nowait) {
+		if (!try_lock_extent(&inode->io_tree, start_pos, last_pos,
+				     cached_state)) {
 			for (i = 0; i < num_pages; i++) {
 				unlock_page(pages[i]);
 				put_page(pages[i]);
+				pages[i] = NULL;
 			}
-			btrfs_start_ordered_extent(ordered);
-			btrfs_put_ordered_extent(ordered);
+
 			return -EAGAIN;
 		}
-		if (ordered)
-			btrfs_put_ordered_extent(ordered);
-
-		*lockstart = start_pos;
-		*lockend = last_pos;
-		ret = 1;
+	} else {
+		lock_extent(&inode->io_tree, start_pos, last_pos, cached_state);
 	}
+
+	ordered = btrfs_lookup_ordered_range(inode, start_pos,
+					     last_pos - start_pos + 1);
+	if (ordered &&
+	    ordered->file_offset + ordered->num_bytes > start_pos &&
+	    ordered->file_offset <= last_pos) {
+		unlock_extent(&inode->io_tree, start_pos, last_pos,
+			      cached_state);
+		for (i = 0; i < num_pages; i++) {
+			unlock_page(pages[i]);
+			put_page(pages[i]);
+		}
+		btrfs_start_ordered_extent(ordered);
+		btrfs_put_ordered_extent(ordered);
+		return -EAGAIN;
+	}
+	if (ordered)
+		btrfs_put_ordered_extent(ordered);
+
+	*lockstart = start_pos;
+	*lockend = last_pos;
 
 	/*
 	 * We should be called after prepare_pages() which should have locked
@@ -1036,7 +1022,7 @@ lock_and_cleanup_extent_if_need(struct btrfs_inode *inode, struct page **pages,
 	for (i = 0; i < num_pages; i++)
 		WARN_ON(!PageLocked(pages[i]));
 
-	return ret;
+	return 0;
 }
 
 /*
@@ -1108,17 +1094,18 @@ void btrfs_check_nocow_unlock(struct btrfs_inode *inode)
 
 static void update_time_for_write(struct inode *inode)
 {
-	struct timespec64 now, ctime;
+	struct timespec64 now, ts;
 
 	if (IS_NOCMTIME(inode))
 		return;
 
 	now = current_time(inode);
-	if (!timespec64_equal(&inode->i_mtime, &now))
-		inode->i_mtime = now;
+	ts = inode_get_mtime(inode);
+	if (!timespec64_equal(&ts, &now))
+		inode_set_mtime_to_ts(inode, now);
 
-	ctime = inode_get_ctime(inode);
-	if (!timespec64_equal(&ctime, &now))
+	ts = inode_get_ctime(inode);
+	if (!timespec64_equal(&ts, &now))
 		inode_set_ctime_to_ts(inode, now);
 
 	if (IS_I_VERSION(inode))
@@ -1231,7 +1218,6 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 		size_t copied;
 		size_t dirty_sectors;
 		size_t num_sectors;
-		int extents_locked;
 
 		/*
 		 * Fault pages before locking them in prepare_pages
@@ -1315,17 +1301,16 @@ again:
 			break;
 		}
 
-		extents_locked = lock_and_cleanup_extent_if_need(
-				BTRFS_I(inode), pages,
-				num_pages, pos, write_bytes, &lockstart,
-				&lockend, nowait, &cached_state);
-		if (extents_locked < 0) {
-			if (!nowait && extents_locked == -EAGAIN)
+		ret = lock_and_cleanup_extent(BTRFS_I(inode), pages,
+					      num_pages, pos, write_bytes,
+					      &lockstart, &lockend, nowait,
+					      &cached_state);
+		if (ret < 0) {
+			if (!nowait && ret == -EAGAIN)
 				goto again;
 
 			btrfs_delalloc_release_extents(BTRFS_I(inode),
 						       reserve_bytes);
-			ret = extents_locked;
 			break;
 		}
 
@@ -1378,18 +1363,8 @@ again:
 					dirty_pages, pos, copied,
 					&cached_state, only_release_metadata);
 
-		/*
-		 * If we have not locked the extent range, because the range's
-		 * start offset is >= i_size, we might still have a non-NULL
-		 * cached extent state, acquired while marking the extent range
-		 * as delalloc through btrfs_dirty_pages(). Therefore free any
-		 * possible cached extent state to avoid a memory leak.
-		 */
-		if (extents_locked)
-			unlock_extent(&BTRFS_I(inode)->io_tree, lockstart,
-				      lockend, &cached_state);
-		else
-			free_extent_state(cached_state);
+		unlock_extent(&BTRFS_I(inode)->io_tree, lockstart, lockend,
+			      &cached_state);
 
 		btrfs_delalloc_release_extents(BTRFS_I(inode), reserve_bytes);
 		if (ret) {
@@ -2519,11 +2494,14 @@ int btrfs_replace_file_extents(struct btrfs_inode *inode,
 		inode_inc_iversion(&inode->vfs_inode);
 
 		if (!extent_info || extent_info->update_times)
-			inode->vfs_inode.i_mtime = inode_set_ctime_current(&inode->vfs_inode);
+			inode_set_mtime_to_ts(&inode->vfs_inode,
+					      inode_set_ctime_current(&inode->vfs_inode));
 
-		ret = btrfs_update_inode(trans, root, inode);
-		if (ret)
+		ret = btrfs_update_inode(trans, inode);
+		if (unlikely(ret)) {
+			btrfs_abort_transaction(trans, ret);
 			break;
+		}
 
 		btrfs_end_transaction(trans);
 		btrfs_btree_balance_dirty(fs_info);
@@ -2760,8 +2738,8 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 
 	ASSERT(trans != NULL);
 	inode_inc_iversion(inode);
-	inode->i_mtime = inode_set_ctime_current(inode);
-	ret = btrfs_update_inode(trans, root, BTRFS_I(inode));
+	inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
+	ret = btrfs_update_inode(trans, BTRFS_I(inode));
 	updated_inode = true;
 	btrfs_end_transaction(trans);
 	btrfs_btree_balance_dirty(fs_info);
@@ -2780,14 +2758,14 @@ out_only_mutex:
 		struct timespec64 now = inode_set_ctime_current(inode);
 
 		inode_inc_iversion(inode);
-		inode->i_mtime = now;
+		inode_set_mtime_to_ts(inode, now);
 		trans = btrfs_start_transaction(root, 1);
 		if (IS_ERR(trans)) {
 			ret = PTR_ERR(trans);
 		} else {
 			int ret2;
 
-			ret = btrfs_update_inode(trans, root, BTRFS_I(inode));
+			ret = btrfs_update_inode(trans, BTRFS_I(inode));
 			ret2 = btrfs_end_transaction(trans);
 			if (!ret)
 				ret = ret2;
@@ -2864,7 +2842,7 @@ static int btrfs_fallocate_update_isize(struct inode *inode,
 	inode_set_ctime_current(inode);
 	i_size_write(inode, end);
 	btrfs_inode_safe_disk_i_size_write(BTRFS_I(inode), 0);
-	ret = btrfs_update_inode(trans, root, BTRFS_I(inode));
+	ret = btrfs_update_inode(trans, BTRFS_I(inode));
 	ret2 = btrfs_end_transaction(trans);
 
 	return ret ? ret : ret2;
