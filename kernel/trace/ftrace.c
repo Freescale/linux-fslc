@@ -4562,6 +4562,9 @@ ftrace_mod_callback(struct trace_array *tr, struct ftrace_hash *hash,
 	char *func;
 	int ret;
 
+	if (!tr)
+		return -ENODEV;
+
 	/* match_records() modifies func, and we need the original */
 	func = kstrdup(func_orig, GFP_KERNEL);
 	if (!func)
@@ -5229,6 +5232,9 @@ __ftrace_match_addr(struct ftrace_hash *hash, unsigned long ip, int remove)
 		if (!entry)
 			return -ENOENT;
 		free_hash_entry(hash, entry);
+		return 0;
+	} else if (__ftrace_lookup_ip(hash, ip) != NULL) {
+		/* Already exists */
 		return 0;
 	}
 
