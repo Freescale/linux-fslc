@@ -41,6 +41,7 @@ static struct ksmbd_transport_ops ksmbd_tcp_transport_ops;
 
 static void tcp_stop_kthread(struct task_struct *kthread);
 static struct interface *alloc_iface(char *ifname);
+static void ksmbd_tcp_disconnect(struct ksmbd_transport *t);
 
 #define KSMBD_TRANS(t)	(&(t)->transport)
 #define TCP_TRANS(t)	((struct tcp_transport *)container_of(t, \
@@ -88,13 +89,21 @@ static struct tcp_transport *alloc_transport(struct socket *client_sk)
 	}
 
 #if IS_ENABLED(CONFIG_IPV6)
-	if (client_sk->sk->sk_family == AF_INET6)
+	if (client_sk->sk->sk_family == AF_INET6) {
 		memcpy(&conn->inet6_addr, &client_sk->sk->sk_v6_daddr, 16);
-	else
+		conn->inet_hash = ipv6_addr_hash(&client_sk->sk->sk_v6_daddr);
+	} else {
 		conn->inet_addr = inet_sk(client_sk->sk)->inet_daddr;
+		conn->inet_hash = ipv4_addr_hash(inet_sk(client_sk->sk)->inet_daddr);
+	}
 #else
 	conn->inet_addr = inet_sk(client_sk->sk)->inet_daddr;
+	conn->inet_hash = ipv4_addr_hash(inet_sk(client_sk->sk)->inet_daddr);
 #endif
+	down_write(&conn_list_lock);
+	hash_add(conn_list, &conn->hlist, conn->inet_hash);
+	up_write(&conn_list_lock);
+
 	conn->transport = KSMBD_TRANS(t);
 	KSMBD_TRANS(t)->conn = conn;
 	KSMBD_TRANS(t)->ops = &ksmbd_tcp_transport_ops;
@@ -202,6 +211,8 @@ static int ksmbd_tcp_new_connection(struct socket *client_sk)
 	t = alloc_transport(client_sk);
 	if (!t) {
 		sock_release(client_sk);
+		if (server_conf.max_connections)
+			atomic_dec(&active_num_conn);
 		return -ENOMEM;
 	}
 
@@ -219,7 +230,7 @@ static int ksmbd_tcp_new_connection(struct socket *client_sk)
 	if (IS_ERR(handler)) {
 		pr_err("cannot start conn thread\n");
 		rc = PTR_ERR(handler);
-		free_transport(t);
+		ksmbd_tcp_disconnect(KSMBD_TRANS(t));
 	}
 	return rc;
 
@@ -239,7 +250,7 @@ static int ksmbd_kthread_fn(void *p)
 	struct socket *client_sk = NULL;
 	struct interface *iface = (struct interface *)p;
 	struct ksmbd_conn *conn;
-	int ret;
+	int ret, inet_hash;
 	unsigned int max_ip_conns;
 
 	while (!kthread_should_stop()) {
@@ -264,9 +275,18 @@ static int ksmbd_kthread_fn(void *p)
 		/*
 		 * Limits repeated connections from clients with the same IP.
 		 */
+#if IS_ENABLED(CONFIG_IPV6)
+		if (client_sk->sk->sk_family == AF_INET6)
+			inet_hash = ipv6_addr_hash(&client_sk->sk->sk_v6_daddr);
+		else
+			inet_hash = ipv4_addr_hash(inet_sk(client_sk->sk)->inet_daddr);
+#else
+		inet_hash = ipv4_addr_hash(inet_sk(client_sk->sk)->inet_daddr);
+#endif
+
 		max_ip_conns = 0;
 		down_read(&conn_list_lock);
-		list_for_each_entry(conn, &conn_list, conns_list) {
+		hash_for_each_possible(conn_list, conn, hlist, inet_hash) {
 #if IS_ENABLED(CONFIG_IPV6)
 			if (client_sk->sk->sk_family == AF_INET6) {
 				if (memcmp(&client_sk->sk->sk_v6_daddr,
@@ -295,7 +315,7 @@ static int ksmbd_kthread_fn(void *p)
 skip_max_ip_conns_limit:
 
 		if (server_conf.max_connections &&
-		    atomic_inc_return(&active_num_conn) >= server_conf.max_connections) {
+		    atomic_inc_return(&active_num_conn) > server_conf.max_connections) {
 			pr_info_ratelimited("Limit the maximum number of connections(%u)\n",
 					    atomic_read(&active_num_conn));
 			atomic_dec(&active_num_conn);

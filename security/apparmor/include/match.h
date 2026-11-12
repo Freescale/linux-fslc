@@ -102,9 +102,6 @@ struct aa_dfa {
 	struct table_header *tables[YYTD_ID_TSIZE];
 };
 
-extern struct aa_dfa *nulldfa;
-extern struct aa_dfa *stacksplitdfa;
-
 #define byte_to_byte(X) (X)
 
 #define UNPACK_ARRAY(TABLE, BLOB, LEN, TTYPE, BTYPE, NTOHX)	\
@@ -121,9 +118,6 @@ static inline size_t table_size(size_t len, size_t el_size)
 {
 	return ALIGN(sizeof(struct table_header) + len * el_size, 8);
 }
-
-int aa_setup_dfa_engine(void);
-void aa_teardown_dfa_engine(void);
 
 #define aa_state_t unsigned int
 
@@ -187,6 +181,7 @@ static inline void aa_put_dfa(struct aa_dfa *dfa)
 #define MATCH_FLAG_DIFF_ENCODE 0x80000000
 #define MARK_DIFF_ENCODE 0x40000000
 #define MATCH_FLAG_OOB_TRANSITION 0x20000000
+#define MARK_DIFF_ENCODE_VERIFIED 0x10000000
 #define MATCH_FLAGS_MASK 0xff000000
 #define MATCH_FLAGS_VALID (MATCH_FLAG_DIFF_ENCODE | MATCH_FLAG_OOB_TRANSITION)
 #define MATCH_FLAGS_INVALID (MATCH_FLAGS_MASK & ~MATCH_FLAGS_VALID)

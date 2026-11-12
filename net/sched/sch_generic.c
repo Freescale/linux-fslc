@@ -910,8 +910,8 @@ static int pfifo_fast_change_tx_queue_len(struct Qdisc *sch,
 		bands[prio] = q;
 	}
 
-	return skb_array_resize_multiple(bands, PFIFO_FAST_BANDS, new_len,
-					 GFP_KERNEL);
+	return skb_array_resize_multiple_bh(bands, PFIFO_FAST_BANDS, new_len,
+					    GFP_KERNEL);
 }
 
 struct Qdisc_ops pfifo_fast_ops __read_mostly = {
@@ -1287,33 +1287,6 @@ static void dev_deactivate_queue(struct net_device *dev,
 	if (qdisc) {
 		qdisc_deactivate(qdisc);
 		rcu_assign_pointer(dev_queue->qdisc, qdisc_default);
-	}
-}
-
-static void dev_reset_queue(struct net_device *dev,
-			    struct netdev_queue *dev_queue,
-			    void *_unused)
-{
-	struct Qdisc *qdisc;
-	bool nolock;
-
-	qdisc = rtnl_dereference(dev_queue->qdisc_sleeping);
-	if (!qdisc)
-		return;
-
-	nolock = qdisc->flags & TCQ_F_NOLOCK;
-
-	if (nolock)
-		spin_lock_bh(&qdisc->seqlock);
-	spin_lock_bh(qdisc_lock(qdisc));
-
-	qdisc_reset(qdisc);
-
-	spin_unlock_bh(qdisc_lock(qdisc));
-	if (nolock) {
-		clear_bit(__QDISC_STATE_MISSED, &qdisc->state);
-		clear_bit(__QDISC_STATE_DRAINING, &qdisc->state);
-		spin_unlock_bh(&qdisc->seqlock);
 	}
 }
 

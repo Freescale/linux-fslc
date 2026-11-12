@@ -71,6 +71,7 @@
 #include "super.h"
 #include "orphan.h"
 #include "backref.h"
+#include "raid-stripe-tree.h"
 
 struct btrfs_iget_args {
 	u64 ino;
@@ -619,7 +620,7 @@ static noinline int cow_file_range_inline(struct btrfs_inode *inode, u64 size,
 	struct btrfs_drop_extents_args drop_args = { 0 };
 	struct btrfs_root *root = inode->root;
 	struct btrfs_fs_info *fs_info = root->fs_info;
-	struct btrfs_trans_handle *trans;
+	struct btrfs_trans_handle *trans = NULL;
 	u64 data_len = (compressed_size ?: size);
 	int ret;
 	struct btrfs_path *path;
@@ -637,13 +638,16 @@ static noinline int cow_file_range_inline(struct btrfs_inode *inode, u64 size,
 		return 1;
 
 	path = btrfs_alloc_path();
-	if (!path)
-		return -ENOMEM;
+	if (!path) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	trans = btrfs_join_transaction(root);
 	if (IS_ERR(trans)) {
-		btrfs_free_path(path);
-		return PTR_ERR(trans);
+		ret = PTR_ERR(trans);
+		trans = NULL;
+		goto out;
 	}
 	trans->block_rsv = &inode->block_rsv;
 
@@ -687,10 +691,15 @@ out:
 	 * it won't count as data extent, free them directly here.
 	 * And at reserve time, it's always aligned to page size, so
 	 * just free one page here.
+	 *
+	 * If we fallback to non-inline (ret == 1) due to -ENOSPC, then we need
+	 * to keep the data reservation.
 	 */
-	btrfs_qgroup_free_data(inode, NULL, 0, PAGE_SIZE, NULL);
+	if (ret <= 0)
+		btrfs_qgroup_free_data(inode, NULL, 0, fs_info->sectorsize, NULL);
 	btrfs_free_path(path);
-	btrfs_end_transaction(trans);
+	if (trans)
+		btrfs_end_transaction(trans);
 	return ret;
 }
 
@@ -3100,6 +3109,10 @@ int btrfs_finish_one_ordered(struct btrfs_ordered_extent *ordered_extent)
 
 	trans->block_rsv = &inode->block_rsv;
 
+	ret = btrfs_insert_raid_extent(trans, ordered_extent);
+	if (ret)
+		goto out;
+
 	if (test_bit(BTRFS_ORDERED_COMPRESSED, &ordered_extent->flags))
 		compress_type = ordered_extent->compress_type;
 	if (test_bit(BTRFS_ORDERED_PREALLOC, &ordered_extent->flags)) {
@@ -3248,7 +3261,8 @@ out:
 int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered)
 {
 	if (btrfs_is_zoned(btrfs_sb(ordered->inode->i_sb)) &&
-	    !test_bit(BTRFS_ORDERED_IOERR, &ordered->flags))
+	    !test_bit(BTRFS_ORDERED_IOERR, &ordered->flags) &&
+	    list_empty(&ordered->bioc_list))
 		btrfs_finish_ordered_zoned(ordered);
 	return btrfs_finish_one_ordered(ordered);
 }
@@ -6216,6 +6230,25 @@ int btrfs_create_new_inode(struct btrfs_trans_handle *trans,
 	struct btrfs_item_batch batch;
 	unsigned long ptr;
 	int ret;
+
+	if (!args->orphan && !args->subvol) {
+		/*
+		 * Before anything else, check if we can add the name to the
+		 * parent directory. We want to avoid a dir item overflow in
+		 * case we have an existing dir item due to existing name
+		 * hash collisions. We do this check here before we call
+		 * btrfs_add_link() down below so that we can avoid a
+		 * transaction abort (which could be exploited by malicious
+		 * users).
+		 *
+		 * For subvolumes we already do this in btrfs_mksubvol().
+		 */
+		ret = btrfs_check_dir_item_collision(BTRFS_I(dir)->root,
+						     btrfs_ino(BTRFS_I(dir)),
+						     name);
+		if (ret < 0)
+			return ret;
+	}
 
 	path = btrfs_alloc_path();
 	if (!path)

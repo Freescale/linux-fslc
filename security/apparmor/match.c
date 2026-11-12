@@ -21,50 +21,6 @@
 
 #define base_idx(X) ((X) & 0xffffff)
 
-static char nulldfa_src[] = {
-	#include "nulldfa.in"
-};
-struct aa_dfa *nulldfa;
-
-static char stacksplitdfa_src[] = {
-	#include "stacksplitdfa.in"
-};
-struct aa_dfa *stacksplitdfa;
-
-int __init aa_setup_dfa_engine(void)
-{
-	int error;
-
-	nulldfa = aa_dfa_unpack(nulldfa_src, sizeof(nulldfa_src),
-				TO_ACCEPT1_FLAG(YYTD_DATA32) |
-				TO_ACCEPT2_FLAG(YYTD_DATA32));
-	if (IS_ERR(nulldfa)) {
-		error = PTR_ERR(nulldfa);
-		nulldfa = NULL;
-		return error;
-	}
-
-	stacksplitdfa = aa_dfa_unpack(stacksplitdfa_src,
-				      sizeof(stacksplitdfa_src),
-				      TO_ACCEPT1_FLAG(YYTD_DATA32) |
-				      TO_ACCEPT2_FLAG(YYTD_DATA32));
-	if (IS_ERR(stacksplitdfa)) {
-		aa_put_dfa(nulldfa);
-		nulldfa = NULL;
-		error = PTR_ERR(stacksplitdfa);
-		stacksplitdfa = NULL;
-		return error;
-	}
-
-	return 0;
-}
-
-void __init aa_teardown_dfa_engine(void)
-{
-	aa_put_dfa(stacksplitdfa);
-	aa_put_dfa(nulldfa);
-}
-
 /**
  * unpack_table - unpack a dfa table (one of accept, default, base, next check)
  * @blob: data to unpack (NOT NULL)
@@ -204,9 +160,10 @@ static int verify_dfa(struct aa_dfa *dfa)
 	if (state_count == 0)
 		goto out;
 	for (i = 0; i < state_count; i++) {
-		if (!(BASE_TABLE(dfa)[i] & MATCH_FLAG_DIFF_ENCODE) &&
-		    (DEFAULT_TABLE(dfa)[i] >= state_count))
+		if (DEFAULT_TABLE(dfa)[i] >= state_count) {
+			pr_err("AppArmor DFA default state out of bounds");
 			goto out;
+		}
 		if (BASE_TABLE(dfa)[i] & MATCH_FLAGS_INVALID) {
 			pr_err("AppArmor DFA state with invalid match flags");
 			goto out;
@@ -245,15 +202,30 @@ static int verify_dfa(struct aa_dfa *dfa)
 		size_t j, k;
 
 		for (j = i;
-		     (BASE_TABLE(dfa)[j] & MATCH_FLAG_DIFF_ENCODE) &&
-		     !(BASE_TABLE(dfa)[j] & MARK_DIFF_ENCODE);
+		     ((BASE_TABLE(dfa)[j] & MATCH_FLAG_DIFF_ENCODE) &&
+		      !(BASE_TABLE(dfa)[j] & MARK_DIFF_ENCODE_VERIFIED));
 		     j = k) {
+			if (BASE_TABLE(dfa)[j] & MARK_DIFF_ENCODE)
+				/* loop in current chain */
+				goto out;
 			k = DEFAULT_TABLE(dfa)[j];
 			if (j == k)
+				/* self loop */
 				goto out;
-			if (k < j)
-				break;		/* already verified */
 			BASE_TABLE(dfa)[j] |= MARK_DIFF_ENCODE;
+		}
+		/* move mark to verified */
+		for (j = i;
+		     (BASE_TABLE(dfa)[j] & MATCH_FLAG_DIFF_ENCODE);
+		     j = k) {
+			k = DEFAULT_TABLE(dfa)[j];
+			if (j < i)
+				/* jumps to state/chain that has been
+				 * verified
+				 */
+				break;
+			BASE_TABLE(dfa)[j] &= ~MARK_DIFF_ENCODE;
+			BASE_TABLE(dfa)[j] |= MARK_DIFF_ENCODE_VERIFIED;
 		}
 	}
 	error = 0;
@@ -452,13 +424,18 @@ aa_state_t aa_dfa_match_len(struct aa_dfa *dfa, aa_state_t start,
 	if (dfa->tables[YYTD_ID_EC]) {
 		/* Equivalence class table defined */
 		u8 *equiv = EQUIV_TABLE(dfa);
-		for (; len; len--)
-			match_char(state, def, base, next, check,
-				   equiv[(u8) *str++]);
+		for (; len; len--) {
+			u8 c = equiv[(u8) *str];
+
+			match_char(state, def, base, next, check, c);
+			str++;
+		}
 	} else {
 		/* default is direct to next state */
-		for (; len; len--)
-			match_char(state, def, base, next, check, (u8) *str++);
+		for (; len; len--) {
+			match_char(state, def, base, next, check, (u8) *str);
+			str++;
+		}
 	}
 
 	return state;
@@ -492,13 +469,18 @@ aa_state_t aa_dfa_match(struct aa_dfa *dfa, aa_state_t start, const char *str)
 		/* Equivalence class table defined */
 		u8 *equiv = EQUIV_TABLE(dfa);
 		/* default is direct to next state */
-		while (*str)
-			match_char(state, def, base, next, check,
-				   equiv[(u8) *str++]);
+		while (*str) {
+			u8 c = equiv[(u8) *str];
+
+			match_char(state, def, base, next, check, c);
+			str++;
+		}
 	} else {
 		/* default is direct to next state */
-		while (*str)
-			match_char(state, def, base, next, check, (u8) *str++);
+		while (*str) {
+			match_char(state, def, base, next, check, (u8) *str);
+			str++;
+		}
 	}
 
 	return state;

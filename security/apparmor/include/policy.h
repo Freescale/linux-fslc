@@ -74,12 +74,14 @@ enum profile_mode {
 
 
 /* struct aa_policydb - match engine for a policy
+ * count: refcount for the pdb
  * dfa: dfa pattern match
  * perms: table of permissions
  * strs: table of strings, index by x
  * start: set of start states for the different classes of data
  */
 struct aa_policydb {
+	struct kref count;
 	struct aa_dfa *dfa;
 	struct {
 		struct aa_perms *perms;
@@ -89,13 +91,36 @@ struct aa_policydb {
 	aa_state_t start[AA_CLASS_LAST + 1];
 };
 
-static inline void aa_destroy_policydb(struct aa_policydb *policy)
-{
-	aa_put_dfa(policy->dfa);
-	if (policy->perms)
-		kvfree(policy->perms);
-	aa_free_str_table(&policy->trans);
+extern struct aa_policydb *nullpdb;
 
+struct aa_policydb *aa_alloc_pdb(gfp_t gfp);
+void aa_pdb_free_kref(struct kref *kref);
+
+/**
+ * aa_get_pdb - increment refcount on @pdb
+ * @pdb: policydb  (MAYBE NULL)
+ *
+ * Returns: pointer to @pdb if @pdb is NULL will return NULL
+ * Requires: @pdb must be held with valid refcount when called
+ */
+static inline struct aa_policydb *aa_get_pdb(struct aa_policydb *pdb)
+{
+	if (pdb)
+		kref_get(&(pdb->count));
+
+	return pdb;
+}
+
+/**
+ * aa_put_pdb - put a pdb refcount
+ * @pdb: pdb to put refcount   (MAYBE NULL)
+ *
+ * Requires: if @pdb != NULL that a valid refcount be held
+ */
+static inline void aa_put_pdb(struct aa_policydb *pdb)
+{
+	if (pdb)
+		kref_put(&pdb->count, aa_pdb_free_kref);
 }
 
 static inline struct aa_perms *aa_lookup_perms(struct aa_policydb *policy,
@@ -139,8 +164,8 @@ struct aa_ruleset {
 	int size;
 
 	/* TODO: merge policy and file */
-	struct aa_policydb policy;
-	struct aa_policydb file;
+	struct aa_policydb *policy;
+	struct aa_policydb *file;
 	struct aa_caps caps;
 
 	struct aa_rlimit rlimits;
@@ -159,7 +184,7 @@ struct aa_ruleset {
  */
 struct aa_attachment {
 	const char *xmatch_str;
-	struct aa_policydb xmatch;
+	struct aa_policydb *xmatch;
 	unsigned int xmatch_len;
 	int xattr_count;
 	char **xattrs;
@@ -276,10 +301,10 @@ static inline aa_state_t RULE_MEDIATES(struct aa_ruleset *rules,
 				       unsigned char class)
 {
 	if (class <= AA_CLASS_LAST)
-		return rules->policy.start[class];
+		return rules->policy->start[class];
 	else
-		return aa_dfa_match_len(rules->policy.dfa,
-					rules->policy.start[0], &class, 1);
+		return aa_dfa_match_len(rules->policy->dfa,
+					rules->policy->start[0], &class, 1);
 }
 
 static inline aa_state_t RULE_MEDIATES_AF(struct aa_ruleset *rules, u16 AF)
@@ -289,7 +314,7 @@ static inline aa_state_t RULE_MEDIATES_AF(struct aa_ruleset *rules, u16 AF)
 
 	if (!state)
 		return DFA_NOMATCH;
-	return aa_dfa_match_len(rules->policy.dfa, state, (char *) &be_af, 2);
+	return aa_dfa_match_len(rules->policy->dfa, state, (char *) &be_af, 2);
 }
 
 static inline aa_state_t ANY_RULE_MEDIATES(struct list_head *head,
@@ -312,7 +337,7 @@ static inline aa_state_t ANY_RULE_MEDIATES(struct list_head *head,
 static inline struct aa_profile *aa_get_profile(struct aa_profile *p)
 {
 	if (p)
-		kref_get(&(p->label.count));
+		kref_get(&(p->label.count.count));
 
 	return p;
 }
@@ -326,7 +351,7 @@ static inline struct aa_profile *aa_get_profile(struct aa_profile *p)
  */
 static inline struct aa_profile *aa_get_profile_not0(struct aa_profile *p)
 {
-	if (p && kref_get_unless_zero(&p->label.count))
+	if (p && kref_get_unless_zero(&p->label.count.count))
 		return p;
 
 	return NULL;
@@ -346,7 +371,7 @@ static inline struct aa_profile *aa_get_profile_rcu(struct aa_profile __rcu **p)
 	rcu_read_lock();
 	do {
 		c = rcu_dereference(*p);
-	} while (c && !kref_get_unless_zero(&c->label.count));
+	} while (c && !kref_get_unless_zero(&c->label.count.count));
 	rcu_read_unlock();
 
 	return c;
@@ -359,7 +384,7 @@ static inline struct aa_profile *aa_get_profile_rcu(struct aa_profile __rcu **p)
 static inline void aa_put_profile(struct aa_profile *p)
 {
 	if (p)
-		kref_put(&p->label.count, aa_label_kref);
+		kref_put(&p->label.count.count, aa_label_kref);
 }
 
 static inline int AUDIT_MODE(struct aa_profile *profile)
@@ -376,7 +401,7 @@ bool aa_policy_admin_capable(const struct cred *subj_cred,
 			     struct aa_label *label, struct aa_ns *ns);
 int aa_may_manage_policy(const struct cred *subj_cred,
 			 struct aa_label *label, struct aa_ns *ns,
-			 u32 mask);
+			 const struct cred *ocred, u32 mask);
 bool aa_current_policy_view_capable(struct aa_ns *ns);
 bool aa_current_policy_admin_capable(struct aa_ns *ns);
 
