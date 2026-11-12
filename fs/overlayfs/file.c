@@ -60,7 +60,7 @@ static struct file *ovl_open_realfile(const struct file *file,
 		if (!inode_owner_or_capable(real_idmap, realinode))
 			flags &= ~O_NOATIME;
 
-		realfile = backing_file_open(&file->f_path, flags, realpath,
+		realfile = backing_file_open(file, flags, realpath,
 					     current_cred());
 	}
 	revert_creds(old_cred);
@@ -527,6 +527,7 @@ static int ovl_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 
 static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
 {
+	struct file *user_file = vma->vm_file;
 	struct file *realfile = file->private_data;
 	const struct cred *old_cred;
 	int ret;
@@ -540,6 +541,11 @@ static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
 	vma_set_file(vma, realfile);
 
 	old_cred = ovl_override_creds(file_inode(file)->i_sb);
+	ret = security_mmap_backing_file(vma, realfile, user_file);
+	if (ret) {
+		revert_creds(old_cred);
+		return ret;
+	}
 	ret = call_mmap(vma->vm_file, vma);
 	revert_creds(old_cred);
 	ovl_file_accessed(file);
@@ -609,6 +615,7 @@ static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
 			    struct file *file_out, loff_t pos_out,
 			    loff_t len, unsigned int flags, enum ovl_copyop op)
 {
+	struct inode *inode_in = file_inode(file_in);
 	struct inode *inode_out = file_inode(file_out);
 	struct fd real_in, real_out;
 	const struct cred *old_cred;
@@ -633,7 +640,23 @@ static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
 		goto out_unlock;
 	}
 
-	old_cred = ovl_override_creds(file_inode(file_out)->i_sb);
+	/*
+	 * For cross-sb copy, vfs_copy_file_range() will verify read access with
+	 * the mounter creds of the dest fs mounter, so we need to explicitly
+	 * verify read access with the source mounter creds.
+	 */
+	if (unlikely(inode_in->i_sb != inode_out->i_sb)) {
+		old_cred = ovl_override_creds(inode_in->i_sb);
+		ret = rw_verify_area(READ, real_in.file, &pos_in, len);
+		revert_creds(old_cred);
+		if (unlikely(ret)) {
+			fdput(real_in);
+			fdput(real_out);
+			goto out_unlock;
+		}
+	}
+
+	old_cred = ovl_override_creds(inode_out->i_sb);
 	switch (op) {
 	case OVL_COPY:
 		ret = vfs_copy_file_range(real_in.file, pos_in,

@@ -342,8 +342,8 @@ void aa_profile_match_label(struct aa_profile *profile,
 	/* TODO: doesn't yet handle extended types */
 	aa_state_t state;
 
-	state = aa_dfa_next(rules->policy.dfa,
-			    rules->policy.start[AA_CLASS_LABEL],
+	state = aa_dfa_next(rules->policy->dfa,
+			    rules->policy->start[AA_CLASS_LABEL],
 			    type);
 	aa_label_match(profile, rules, label, state, false, request, perms);
 }
@@ -448,24 +448,22 @@ bool aa_policy_init(struct aa_policy *policy, const char *prefix,
 		    const char *name, gfp_t gfp)
 {
 	char *hname;
+	size_t hname_sz;
 
+	INIT_LIST_HEAD(&policy->list);
+	INIT_LIST_HEAD(&policy->profiles);
+	hname_sz = (prefix ? strlen(prefix) + 2 : 0) + strlen(name) + 1;
 	/* freed by policy_free */
-	if (prefix) {
-		hname = aa_str_alloc(strlen(prefix) + strlen(name) + 3, gfp);
-		if (hname)
-			sprintf(hname, "%s//%s", prefix, name);
-	} else {
-		hname = aa_str_alloc(strlen(name) + 1, gfp);
-		if (hname)
-			strcpy(hname, name);
-	}
+	hname = aa_str_alloc(hname_sz, gfp);
 	if (!hname)
 		return false;
+	if (prefix)
+		scnprintf(hname, hname_sz, "%s//%s", prefix, name);
+	else
+		strscpy(hname, name, hname_sz);
 	policy->hname = hname;
 	/* base.name is a substring of fqname */
 	policy->name = basename(policy->hname);
-	INIT_LIST_HEAD(&policy->list);
-	INIT_LIST_HEAD(&policy->profiles);
 
 	return true;
 }

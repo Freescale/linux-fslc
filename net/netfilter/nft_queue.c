@@ -69,8 +69,7 @@ static void nft_queue_sreg_eval(const struct nft_expr *expr,
 }
 
 static int nft_queue_validate(const struct nft_ctx *ctx,
-			      const struct nft_expr *expr,
-			      const struct nft_data **data)
+			      const struct nft_expr *expr)
 {
 	static const unsigned int supported_hooks = ((1 << NF_INET_PRE_ROUTING) |
 						     (1 << NF_INET_LOCAL_IN) |
@@ -136,7 +135,7 @@ static int nft_queue_sreg_init(const struct nft_ctx *ctx,
 	struct nft_queue *priv = nft_expr_priv(expr);
 	int err;
 
-	err = nft_parse_register_load(tb[NFTA_QUEUE_SREG_QNUM],
+	err = nft_parse_register_load(ctx, tb[NFTA_QUEUE_SREG_QNUM],
 				      &priv->sreg_qnum, sizeof(u32));
 	if (err < 0)
 		return err;
@@ -192,7 +191,6 @@ static const struct nft_expr_ops nft_queue_ops = {
 	.init		= nft_queue_init,
 	.dump		= nft_queue_dump,
 	.validate	= nft_queue_validate,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static const struct nft_expr_ops nft_queue_sreg_ops = {
@@ -202,7 +200,6 @@ static const struct nft_expr_ops nft_queue_sreg_ops = {
 	.init		= nft_queue_sreg_init,
 	.dump		= nft_queue_sreg_dump,
 	.validate	= nft_queue_validate,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static const struct nft_expr_ops *

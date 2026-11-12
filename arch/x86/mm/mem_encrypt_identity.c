@@ -157,7 +157,7 @@ static void __head sme_populate_pgd_large(struct sme_populate_pgd_data *ppd)
 		return;
 
 	pmd = pmd_offset(pud, ppd->vaddr);
-	if (pmd_large(*pmd))
+	if (pmd_leaf(*pmd))
 		return;
 
 	set_pmd(pmd, __pmd(ppd->paddr | ppd->pmd_flags));
@@ -181,7 +181,7 @@ static void __head sme_populate_pgd(struct sme_populate_pgd_data *ppd)
 		set_pmd(pmd, __pmd(PMD_FLAGS | __pa(pte)));
 	}
 
-	if (pmd_large(*pmd))
+	if (pmd_leaf(*pmd))
 		return;
 
 	pte = pte_offset_kernel(pmd, ppd->vaddr);
@@ -562,7 +562,7 @@ void __head sme_enable(struct boot_params *bp)
 	}
 
 	RIP_REL_REF(sme_me_mask) = me_mask;
-	physical_mask &= ~me_mask;
-	cc_vendor = CC_VENDOR_AMD;
+	RIP_REL_REF(physical_mask) &= ~me_mask;
+	RIP_REL_REF(cc_vendor) = CC_VENDOR_AMD;
 	cc_set_mask(me_mask);
 }

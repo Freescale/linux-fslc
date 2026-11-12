@@ -2520,7 +2520,7 @@ next:
 		mvneta_xdp_put_buff(pp, rxq, &xdp_buf, -1);
 
 	if (ps.xdp_redirect)
-		xdp_do_flush_map();
+		xdp_do_flush();
 
 	if (ps.rx_packets)
 		mvneta_update_stats(pp, &ps);
@@ -5865,6 +5865,9 @@ static int mvneta_resume(struct device *device)
 	mvneta_start_dev(pp);
 	rtnl_unlock();
 	mvneta_set_rx_mode(dev);
+
+	if (!pp->neta_armada3700)
+		on_each_cpu(mvneta_percpu_enable, pp, true);
 
 	return 0;
 }

@@ -1314,6 +1314,23 @@ int kfd_parse_crat_table(void *crat_image, struct list_head *device_list,
 	sub_type_hdr = (struct crat_subtype_generic *)(crat_table+1);
 	while ((char *)sub_type_hdr + sizeof(struct crat_subtype_generic) <
 			((char *)crat_image) + image_len) {
+		if (!sub_type_hdr->length ||
+		    sub_type_hdr->length < sizeof(struct crat_subtype_generic)) {
+			pr_warn("Invalid CRAT subtype length %u\n",
+				sub_type_hdr->length);
+			ret = -EINVAL;
+			break;
+		}
+
+		/* Validate subtype fits within remaining image */
+		if ((char *)sub_type_hdr + sub_type_hdr->length >
+		    (char *)crat_image + image_len) {
+			pr_warn("CRAT subtype length %u exceeds image bounds\n",
+				sub_type_hdr->length);
+			ret = -EINVAL;
+			break;
+		}
+
 		if (sub_type_hdr->flags & CRAT_SUBTYPE_FLAGS_ENABLED) {
 			ret = kfd_parse_subtype(sub_type_hdr, device_list);
 			if (ret)
@@ -2037,11 +2054,12 @@ static int kfd_create_vcrat_image_gpu(void *pcrat_image,
 				      uint32_t proximity_domain)
 {
 	struct crat_header *crat_table = (struct crat_header *)pcrat_image;
+	struct amdgpu_gfx_config *gfx_info = &kdev->adev->gfx.config;
+	struct amdgpu_cu_info *cu_info = &kdev->adev->gfx.cu_info;
 	struct crat_subtype_generic *sub_type_hdr;
 	struct kfd_local_mem_info local_mem_info;
 	struct kfd_topology_device *peer_dev;
 	struct crat_subtype_computeunit *cu;
-	struct kfd_cu_info cu_info;
 	int avail_size = *size;
 	uint32_t total_num_of_cu;
 	uint32_t nid = 0;
@@ -2085,21 +2103,20 @@ static int kfd_create_vcrat_image_gpu(void *pcrat_image,
 	cu->flags |= CRAT_CU_FLAGS_GPU_PRESENT;
 	cu->proximity_domain = proximity_domain;
 
-	amdgpu_amdkfd_get_cu_info(kdev->adev, &cu_info);
-	cu->num_simd_per_cu = cu_info.simd_per_cu;
-	cu->num_simd_cores = cu_info.simd_per_cu *
-			(cu_info.cu_active_number / kdev->kfd->num_nodes);
-	cu->max_waves_simd = cu_info.max_waves_per_simd;
+	cu->num_simd_per_cu = cu_info->simd_per_cu;
+	cu->num_simd_cores = cu_info->simd_per_cu *
+			(cu_info->number / kdev->kfd->num_nodes);
+	cu->max_waves_simd = cu_info->max_waves_per_simd;
 
-	cu->wave_front_size = cu_info.wave_front_size;
-	cu->array_count = cu_info.num_shader_arrays_per_engine *
-		cu_info.num_shader_engines;
-	total_num_of_cu = (cu->array_count * cu_info.num_cu_per_sh);
+	cu->wave_front_size = cu_info->wave_front_size;
+	cu->array_count = gfx_info->max_sh_per_se *
+		gfx_info->max_shader_engines;
+	total_num_of_cu = (cu->array_count * gfx_info->max_cu_per_sh);
 	cu->processor_id_low = get_and_inc_gpu_processor_id(total_num_of_cu);
-	cu->num_cu_per_array = cu_info.num_cu_per_sh;
-	cu->max_slots_scatch_cu = cu_info.max_scratch_slots_per_cu;
-	cu->num_banks = cu_info.num_shader_engines;
-	cu->lds_size_in_kb = cu_info.lds_size;
+	cu->num_cu_per_array = gfx_info->max_cu_per_sh;
+	cu->max_slots_scatch_cu = cu_info->max_scratch_slots_per_cu;
+	cu->num_banks = gfx_info->max_shader_engines;
+	cu->lds_size_in_kb = cu_info->lds_size;
 
 	cu->hsa_capability = 0;
 

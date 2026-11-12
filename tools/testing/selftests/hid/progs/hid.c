@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) 2022 Red hat */
-#include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
 #include "hid_bpf_helpers.h"
 
 char _license[] SEC("license") = "GPL";
@@ -16,9 +13,10 @@ struct attach_prog_args {
 
 __u64 callback_check = 52;
 __u64 callback2_check = 52;
+__u64 get_data_overflow_check;
 
-SEC("?fmod_ret/hid_bpf_device_event")
-int BPF_PROG(hid_first_event, struct hid_bpf_ctx *hid_ctx)
+SEC("?struct_ops/hid_device_event")
+int BPF_PROG(hid_first_event, struct hid_bpf_ctx *hid_ctx, enum hid_report_type type)
 {
 	__u8 *rw_data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 3 /* size */);
 
@@ -32,8 +30,14 @@ int BPF_PROG(hid_first_event, struct hid_bpf_ctx *hid_ctx)
 	return hid_ctx->size;
 }
 
-SEC("?fmod_ret/hid_bpf_device_event")
-int BPF_PROG(hid_second_event, struct hid_bpf_ctx *hid_ctx)
+SEC(".struct_ops.link")
+struct hid_bpf_ops first_event = {
+	.hid_device_event = (void *)hid_first_event,
+	.hid_id = 2,
+};
+
+SEC("?struct_ops/hid_device_event")
+int BPF_PROG(hid_second_event, struct hid_bpf_ctx *hid_ctx, enum hid_report_type type)
 {
 	__u8 *rw_data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 4 /* size */);
 
@@ -45,8 +49,13 @@ int BPF_PROG(hid_second_event, struct hid_bpf_ctx *hid_ctx)
 	return hid_ctx->size;
 }
 
-SEC("?fmod_ret/hid_bpf_device_event")
-int BPF_PROG(hid_change_report_id, struct hid_bpf_ctx *hid_ctx)
+SEC(".struct_ops.link")
+struct hid_bpf_ops second_event = {
+	.hid_device_event = (void *)hid_second_event,
+};
+
+SEC("?struct_ops/hid_device_event")
+int BPF_PROG(hid_change_report_id, struct hid_bpf_ctx *hid_ctx, enum hid_report_type type)
 {
 	__u8 *rw_data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 3 /* size */);
 
@@ -58,15 +67,10 @@ int BPF_PROG(hid_change_report_id, struct hid_bpf_ctx *hid_ctx)
 	return 9;
 }
 
-SEC("syscall")
-int attach_prog(struct attach_prog_args *ctx)
-{
-	ctx->retval = hid_bpf_attach_prog(ctx->hid,
-					  ctx->prog_fd,
-					  ctx->insert_head ? HID_BPF_FLAG_INSERT_HEAD :
-							     HID_BPF_FLAG_NONE);
-	return 0;
-}
+SEC(".struct_ops.link")
+struct hid_bpf_ops change_report_id = {
+	.hid_device_event = (void *)hid_change_report_id,
+};
 
 struct hid_hw_request_syscall_args {
 	/* data needs to come at offset 0 so we can use it in calls */
@@ -138,7 +142,12 @@ static const __u8 rdesc[] = {
 	0xc0,			/* END_COLLECTION */
 };
 
-SEC("?fmod_ret/hid_bpf_rdesc_fixup")
+/*
+ * the following program is marked as sleepable (struct_ops.s).
+ * This is not strictly mandatory but is a nice test for
+ * sleepable struct_ops
+ */
+SEC("?struct_ops.s/hid_rdesc_fixup")
 int BPF_PROG(hid_rdesc_fixup, struct hid_bpf_ctx *hid_ctx)
 {
 	__u8 *data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 4096 /* size */);
@@ -157,8 +166,27 @@ int BPF_PROG(hid_rdesc_fixup, struct hid_bpf_ctx *hid_ctx)
 	return sizeof(rdesc) + 73;
 }
 
-SEC("?fmod_ret/hid_bpf_device_event")
-int BPF_PROG(hid_test_insert1, struct hid_bpf_ctx *hid_ctx)
+SEC(".struct_ops.link")
+struct hid_bpf_ops rdesc_fixup = {
+	.hid_rdesc_fixup = (void *)hid_rdesc_fixup,
+};
+
+SEC("?struct_ops.s/hid_rdesc_fixup")
+int BPF_PROG(hid_rdesc_fixup_get_data_overflow, struct hid_bpf_ctx *hid_ctx)
+{
+	if (!hid_bpf_get_data(hid_ctx, 2 /* offset */, ~0ULL /* size */))
+		get_data_overflow_check = 1;
+
+	return 0;
+}
+
+SEC(".struct_ops.link")
+struct hid_bpf_ops rdesc_fixup_get_data_overflow = {
+	.hid_rdesc_fixup = (void *)hid_rdesc_fixup_get_data_overflow,
+};
+
+SEC("?struct_ops/hid_device_event")
+int BPF_PROG(hid_test_insert1, struct hid_bpf_ctx *hid_ctx, enum hid_report_type type)
 {
 	__u8 *data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 4 /* size */);
 
@@ -174,8 +202,14 @@ int BPF_PROG(hid_test_insert1, struct hid_bpf_ctx *hid_ctx)
 	return 0;
 }
 
-SEC("?fmod_ret/hid_bpf_device_event")
-int BPF_PROG(hid_test_insert2, struct hid_bpf_ctx *hid_ctx)
+SEC(".struct_ops.link")
+struct hid_bpf_ops test_insert1 = {
+	.hid_device_event = (void *)hid_test_insert1,
+	.flags = BPF_F_BEFORE,
+};
+
+SEC("?struct_ops/hid_device_event")
+int BPF_PROG(hid_test_insert2, struct hid_bpf_ctx *hid_ctx, enum hid_report_type type)
 {
 	__u8 *data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 4 /* size */);
 
@@ -191,8 +225,13 @@ int BPF_PROG(hid_test_insert2, struct hid_bpf_ctx *hid_ctx)
 	return 0;
 }
 
-SEC("?fmod_ret/hid_bpf_device_event")
-int BPF_PROG(hid_test_insert3, struct hid_bpf_ctx *hid_ctx)
+SEC(".struct_ops.link")
+struct hid_bpf_ops test_insert2 = {
+	.hid_device_event = (void *)hid_test_insert2,
+};
+
+SEC("?struct_ops/hid_device_event")
+int BPF_PROG(hid_test_insert3, struct hid_bpf_ctx *hid_ctx, enum hid_report_type type)
 {
 	__u8 *data = hid_bpf_get_data(hid_ctx, 0 /* offset */, 4 /* size */);
 
@@ -207,3 +246,8 @@ int BPF_PROG(hid_test_insert3, struct hid_bpf_ctx *hid_ctx)
 
 	return 0;
 }
+
+SEC(".struct_ops.link")
+struct hid_bpf_ops test_insert3 = {
+	.hid_device_event = (void *)hid_test_insert3,
+};

@@ -293,7 +293,12 @@ int usb4_switch_setup(struct tb_switch *sw)
 	/* TBT3 supported by the CM */
 	val &= ~ROUTER_CS_5_CNS;
 
-	return tb_sw_write(sw, &val, TB_CFG_SWITCH, ROUTER_CS_5, 1);
+	ret = tb_sw_write(sw, &val, TB_CFG_SWITCH, ROUTER_CS_5, 1);
+	if (ret)
+		return ret;
+
+	return tb_switch_wait_for_bit(sw, ROUTER_CS_6, ROUTER_CS_6_RR,
+				      ROUTER_CS_6_RR, 500);
 }
 
 /**
@@ -303,7 +308,7 @@ int usb4_switch_setup(struct tb_switch *sw)
  * Sets configuration valid bit for the router. Must be called before
  * any tunnels can be set through the router and after
  * usb4_switch_setup() has been called. Can be called to host and device
- * routers (does nothing for the latter).
+ * routers (does nothing for the former).
  *
  * Returns %0 in success and negative errno otherwise.
  */
@@ -326,7 +331,7 @@ int usb4_switch_configuration_valid(struct tb_switch *sw)
 		return ret;
 
 	return tb_switch_wait_for_bit(sw, ROUTER_CS_6, ROUTER_CS_6_CR,
-				      ROUTER_CS_6_CR, 50);
+				      ROUTER_CS_6_CR, 500);
 }
 
 /**
@@ -405,12 +410,12 @@ bool usb4_switch_lane_bonding_possible(struct tb_switch *sw)
  * usb4_switch_set_wake() - Enabled/disable wake
  * @sw: USB4 router
  * @flags: Wakeup flags (%0 to disable)
+ * @runtime: Wake is being programmed during system runtime
  *
  * Enables/disables router to wake up from sleep.
  */
-int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags)
+int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags, bool runtime)
 {
-	struct usb4_port *usb4;
 	struct tb_port *port;
 	u64 route = tb_route(sw);
 	u32 val;
@@ -440,13 +445,11 @@ int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags)
 			val |= PORT_CS_19_WOU4;
 		} else {
 			bool configured = val & PORT_CS_19_PC;
-			usb4 = port->usb4;
+			bool wakeup = runtime || device_may_wakeup(&port->usb4->dev);
 
-			if (((flags & TB_WAKE_ON_CONNECT) |
-			      device_may_wakeup(&usb4->dev)) && !configured)
+			if ((flags & TB_WAKE_ON_CONNECT) && wakeup && !configured)
 				val |= PORT_CS_19_WOC;
-			if (((flags & TB_WAKE_ON_DISCONNECT) |
-			      device_may_wakeup(&usb4->dev)) && configured)
+			if ((flags & TB_WAKE_ON_DISCONNECT) && wakeup && configured)
 				val |= PORT_CS_19_WOD;
 			if ((flags & TB_WAKE_ON_USB4) && configured)
 				val |= PORT_CS_19_WOU4;
@@ -1495,6 +1498,112 @@ bool usb4_port_clx_supported(struct tb_port *port)
 }
 
 /**
+ * usb4_port_asym_supported() - If the port supports asymmetric link
+ * @port: USB4 port
+ *
+ * Checks if the port and the cable supports asymmetric link and returns
+ * %true in that case.
+ */
+bool usb4_port_asym_supported(struct tb_port *port)
+{
+	u32 val;
+
+	if (!port->cap_usb4)
+		return false;
+
+	if (tb_port_read(port, &val, TB_CFG_PORT, port->cap_usb4 + PORT_CS_18, 1))
+		return false;
+
+	return !!(val & PORT_CS_18_CSA);
+}
+
+/**
+ * usb4_port_asym_set_link_width() - Set link width to asymmetric or symmetric
+ * @port: USB4 port
+ * @width: Asymmetric width to configure
+ *
+ * Sets USB4 port link width to @width. Can be called for widths where
+ * usb4_port_asym_width_supported() returned @true.
+ */
+int usb4_port_asym_set_link_width(struct tb_port *port, enum tb_link_width width)
+{
+	u32 val;
+	int ret;
+
+	if (!port->cap_phy)
+		return -EINVAL;
+
+	ret = tb_port_read(port, &val, TB_CFG_PORT,
+			   port->cap_phy + LANE_ADP_CS_1, 1);
+	if (ret)
+		return ret;
+
+	val &= ~LANE_ADP_CS_1_TARGET_WIDTH_ASYM_MASK;
+	switch (width) {
+	case TB_LINK_WIDTH_DUAL:
+		val |= FIELD_PREP(LANE_ADP_CS_1_TARGET_WIDTH_ASYM_MASK,
+				  LANE_ADP_CS_1_TARGET_WIDTH_ASYM_DUAL);
+		break;
+	case TB_LINK_WIDTH_ASYM_TX:
+		val |= FIELD_PREP(LANE_ADP_CS_1_TARGET_WIDTH_ASYM_MASK,
+				  LANE_ADP_CS_1_TARGET_WIDTH_ASYM_TX);
+		break;
+	case TB_LINK_WIDTH_ASYM_RX:
+		val |= FIELD_PREP(LANE_ADP_CS_1_TARGET_WIDTH_ASYM_MASK,
+				  LANE_ADP_CS_1_TARGET_WIDTH_ASYM_RX);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return tb_port_write(port, &val, TB_CFG_PORT,
+			     port->cap_phy + LANE_ADP_CS_1, 1);
+}
+
+/**
+ * usb4_port_asym_start() - Start symmetry change and wait for completion
+ * @port: USB4 port
+ *
+ * Start symmetry change of the link to asymmetric or symmetric
+ * (according to what was previously set in tb_port_set_link_width().
+ * Wait for completion of the change.
+ *
+ * Returns %0 in case of success, %-ETIMEDOUT if case of timeout or
+ * a negative errno in case of a failure.
+ */
+int usb4_port_asym_start(struct tb_port *port)
+{
+	int ret;
+	u32 val;
+
+	ret = tb_port_read(port, &val, TB_CFG_PORT,
+			   port->cap_usb4 + PORT_CS_19, 1);
+	if (ret)
+		return ret;
+
+	val &= ~PORT_CS_19_START_ASYM;
+	val |= FIELD_PREP(PORT_CS_19_START_ASYM, 1);
+
+	ret = tb_port_write(port, &val, TB_CFG_PORT,
+			    port->cap_usb4 + PORT_CS_19, 1);
+	if (ret)
+		return ret;
+
+	/*
+	 * Wait for PORT_CS_19_START_ASYM to be 0. This means the USB4
+	 * port started the symmetry transition.
+	 */
+	ret = usb4_port_wait_for_bit(port, port->cap_usb4 + PORT_CS_19,
+				     PORT_CS_19_START_ASYM, 0, 1000);
+	if (ret)
+		return ret;
+
+	/* Then wait for the transtion to be completed */
+	return usb4_port_wait_for_bit(port, port->cap_usb4 + PORT_CS_18,
+				      PORT_CS_18_TIP, 0, 5000);
+}
+
+/**
  * usb4_port_margining_caps() - Read USB4 port marginig capabilities
  * @port: USB4 port
  * @caps: Array with at least two elements to hold the results
@@ -2274,13 +2383,13 @@ int usb4_usb3_port_release_bandwidth(struct tb_port *port, int *upstream_bw,
 		goto err_request;
 
 	/*
-	 * Always keep 1000 Mb/s to make sure xHCI has at least some
+	 * Always keep 900 Mb/s to make sure xHCI has at least some
 	 * bandwidth available for isochronous traffic.
 	 */
-	if (consumed_up < 1000)
-		consumed_up = 1000;
-	if (consumed_down < 1000)
-		consumed_down = 1000;
+	if (consumed_up < 900)
+		consumed_up = 900;
+	if (consumed_down < 900)
+		consumed_down = 900;
 
 	ret = usb4_usb3_port_write_allocated_bandwidth(port, consumed_up,
 						       consumed_down);

@@ -34,6 +34,7 @@
 #include <asm/cpu-features.h>
 #include <asm/fpu.h>
 #include <asm/lbt.h>
+#include <asm/sigframe.h>
 #include <asm/ucontext.h>
 #include <asm/vdso.h>
 
@@ -70,11 +71,6 @@ extern asmlinkage int _restore_lbt_context(void __user *regs, void __user *eflag
 extern asmlinkage int _save_ftop_context(void __user *ftop);
 extern asmlinkage int _restore_ftop_context(void __user *ftop);
 #endif
-
-struct rt_sigframe {
-	struct siginfo rs_info;
-	struct ucontext rs_uctx;
-};
 
 struct _ctx_layout {
 	struct sctx_info *addr;
@@ -697,17 +693,17 @@ static int setup_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc,
 	for (i = 1; i < 32; i++)
 		err |= __put_user(regs->regs[i], &sc->sc_regs[i]);
 
+#ifdef CONFIG_CPU_HAS_LBT
+	if (extctx->lbt.addr)
+		err |= protected_save_lbt_context(extctx);
+#endif
+
 	if (extctx->lasx.addr)
 		err |= protected_save_lasx_context(extctx);
 	else if (extctx->lsx.addr)
 		err |= protected_save_lsx_context(extctx);
 	else if (extctx->fpu.addr)
 		err |= protected_save_fpu_context(extctx);
-
-#ifdef CONFIG_CPU_HAS_LBT
-	if (extctx->lbt.addr)
-		err |= protected_save_lbt_context(extctx);
-#endif
 
 	/* Set the "end" magic */
 	info = (struct sctx_info *)extctx->end.addr;

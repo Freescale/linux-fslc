@@ -14,6 +14,13 @@ fi
 
 grep -q GenuineIntel /proc/cpuinfo || { echo Skipping non-Intel; exit 2; }
 
+# Skip if no permission to record system-wide events
+if ! perf stat -a -e instructions sleep 0.01 >/dev/null 2>&1; then
+  echo "Skipping: no permission to record system-wide events (-a)"
+  exit 2
+fi
+
+
 pythonvalidator=$(dirname $0)/lib/perf_metric_validation.py
 rulefile=$(dirname $0)/lib/perf_metric_validation_rules.json
 tmpdir=$(mktemp -d /tmp/__perf_test.program.XXXXX)
@@ -25,6 +32,8 @@ echo "Output will be stored in: $tmpdir"
 $PYTHON $pythonvalidator -rule $rulefile -output_dir $tmpdir -wl "${workload}"
 ret=$?
 rm -rf $tmpdir
-
+if [ $ret -ne 0 ]; then
+	echo "Metric validation return with erros. Please check metrics reported with errors."
+fi
 exit $ret
 

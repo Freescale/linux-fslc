@@ -273,8 +273,6 @@ int amdgpu_irq_init(struct amdgpu_device *adev)
 	int r = 0;
 	unsigned int irq;
 
-	spin_lock_init(&adev->irq.lock);
-
 	/* Enable MSI if not disabled by module parameter */
 	adev->irq.msi_enabled = false;
 
@@ -502,7 +500,7 @@ void amdgpu_irq_delegate(struct amdgpu_device *adev,
 			 unsigned int num_dw)
 {
 	amdgpu_ih_ring_write(adev, &adev->irq.ih_soft, entry->iv_entry, num_dw);
-	schedule_work(&adev->irq.ih_soft_work);
+	queue_work(system_unbound_wq, &adev->irq.ih_soft_work);
 }
 
 /**

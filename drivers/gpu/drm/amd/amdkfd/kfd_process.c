@@ -35,6 +35,7 @@
 #include <linux/pm_runtime.h>
 #include "amdgpu_amdkfd.h"
 #include "amdgpu.h"
+#include "amdgpu_reset.h"
 
 struct mm_struct;
 
@@ -306,14 +307,14 @@ static ssize_t kfd_procfs_show(struct kobject *kobj, struct attribute *attr,
 	} else if (strncmp(attr->name, "vram_", 5) == 0) {
 		struct kfd_process_device *pdd = container_of(attr, struct kfd_process_device,
 							      attr_vram);
-		return snprintf(buffer, PAGE_SIZE, "%llu\n", READ_ONCE(pdd->vram_usage));
+		return snprintf(buffer, PAGE_SIZE, "%llu\n", atomic64_read(&pdd->vram_usage));
 	} else if (strncmp(attr->name, "sdma_", 5) == 0) {
 		struct kfd_process_device *pdd = container_of(attr, struct kfd_process_device,
 							      attr_sdma);
 		struct kfd_sdma_activity_handler_workarea sdma_activity_work_handler;
 
-		INIT_WORK(&sdma_activity_work_handler.sdma_activity_work,
-					kfd_sdma_activity_worker);
+		INIT_WORK_ONSTACK(&sdma_activity_work_handler.sdma_activity_work,
+				  kfd_sdma_activity_worker);
 
 		sdma_activity_work_handler.pdd = pdd;
 		sdma_activity_work_handler.sdma_activity_counter = 0;
@@ -321,6 +322,7 @@ static ssize_t kfd_procfs_show(struct kobject *kobj, struct attribute *attr,
 		schedule_work(&sdma_activity_work_handler.sdma_activity_work);
 
 		flush_work(&sdma_activity_work_handler.sdma_activity_work);
+		destroy_work_on_stack(&sdma_activity_work_handler.sdma_activity_work);
 
 		return snprintf(buffer, PAGE_SIZE, "%llu\n",
 				(sdma_activity_work_handler.sdma_activity_counter)/
@@ -810,6 +812,14 @@ struct kfd_process *kfd_create_process(struct task_struct *thread)
 		return ERR_PTR(-EINVAL);
 	}
 
+	/* If the process just called exec(3), it is possible that the
+	 * cleanup of the kfd_process (following the release of the mm
+	 * of the old process image) is still in the cleanup work queue.
+	 * Make sure to drain any job before trying to recreate any
+	 * resource for this process.
+	 */
+	flush_workqueue(kfd_process_wq);
+
 	/*
 	 * take kfd processes mutex before starting of process creation
 	 * so there won't be a case where two threads of the same process
@@ -828,14 +838,6 @@ struct kfd_process *kfd_create_process(struct task_struct *thread)
 	if (process) {
 		pr_debug("Process already found\n");
 	} else {
-		/* If the process just called exec(3), it is possible that the
-		 * cleanup of the kfd_process (following the release of the mm
-		 * of the old process image) is still in the cleanup work queue.
-		 * Make sure to drain any job before trying to recreate any
-		 * resource for this process.
-		 */
-		flush_workqueue(kfd_process_wq);
-
 		process = create_process(thread);
 		if (IS_ERR(process))
 			goto out;
@@ -1045,9 +1047,10 @@ static void kfd_process_destroy_pdds(struct kfd_process *p)
 
 		kfd_free_process_doorbells(pdd->dev->kfd, pdd);
 
-		if (pdd->dev->kfd->shared_resources.enable_mes)
+		if (pdd->dev->kfd->shared_resources.enable_mes &&
+			pdd->proc_ctx_cpu_ptr)
 			amdgpu_amdkfd_free_gtt_mem(pdd->dev->adev,
-						   pdd->proc_ctx_bo);
+						   &pdd->proc_ctx_bo);
 		/*
 		 * before destroying pdd, make sure to report availability
 		 * for auto suspend
@@ -1108,6 +1111,17 @@ static void kfd_process_remove_sysfs(struct kfd_process *p)
 	p->kobj = NULL;
 }
 
+/*
+ * If any GPU is ongoing reset, wait for reset complete.
+ */
+static void kfd_process_wait_gpu_reset_complete(struct kfd_process *p)
+{
+	int i;
+
+	for (i = 0; i < p->n_pdds; i++)
+		flush_workqueue(p->pdds[i]->dev->adev->reset_domain->wq);
+}
+
 /* No process locking is needed in this function, because the process
  * is not findable any more. We must assume that no other thread is
  * using it any more, otherwise we couldn't safely free the process
@@ -1120,6 +1134,11 @@ static void kfd_process_wq_release(struct work_struct *work)
 
 	kfd_process_dequeue_from_all_devices(p);
 	pqm_uninit(&p->pqm);
+
+	/*
+	 * If GPU in reset, user queues may still running, wait for reset complete.
+	 */
+	kfd_process_wait_gpu_reset_complete(p);
 
 	/* Signal the eviction fence after user mode queues are
 	 * destroyed. This allows any BOs to be freed without
@@ -1307,7 +1326,8 @@ int kfd_process_init_cwsr_apu(struct kfd_process *p, struct file *filep)
 		if (IS_ERR_VALUE(qpd->tba_addr)) {
 			int err = qpd->tba_addr;
 
-			pr_err("Failure to set tba address. error %d.\n", err);
+			dev_err(dev->adev->dev,
+				"Failure to set tba address. error %d.\n", err);
 			qpd->tba_addr = 0;
 			qpd->cwsr_kaddr = NULL;
 			return err;
@@ -1570,7 +1590,6 @@ struct kfd_process_device *kfd_create_process_device_data(struct kfd_node *dev,
 							struct kfd_process *p)
 {
 	struct kfd_process_device *pdd = NULL;
-	int retval = 0;
 
 	if (WARN_ON_ONCE(p->n_pdds >= MAX_GPU_INSTANCE))
 		return NULL;
@@ -1589,24 +1608,10 @@ struct kfd_process_device *kfd_create_process_device_data(struct kfd_node *dev,
 	pdd->bound = PDD_UNBOUND;
 	pdd->already_dequeued = false;
 	pdd->runtime_inuse = false;
-	pdd->vram_usage = 0;
+	atomic64_set(&pdd->vram_usage, 0);
 	pdd->sdma_past_activity_counter = 0;
 	pdd->user_gpu_id = dev->id;
 	atomic64_set(&pdd->evict_duration_counter, 0);
-
-	if (dev->kfd->shared_resources.enable_mes) {
-		retval = amdgpu_amdkfd_alloc_gtt_mem(dev->adev,
-						AMDGPU_MES_PROC_CTX_SIZE,
-						&pdd->proc_ctx_bo,
-						&pdd->proc_ctx_gpu_addr,
-						&pdd->proc_ctx_cpu_ptr,
-						false);
-		if (retval) {
-			pr_err("failed to allocate process context bo\n");
-			goto err_free_pdd;
-		}
-		memset(pdd->proc_ctx_cpu_ptr, 0, AMDGPU_MES_PROC_CTX_SIZE);
-	}
 
 	p->pdds[p->n_pdds++] = pdd;
 	if (kfd_dbg_is_per_vmid_supported(pdd->dev))
@@ -1619,10 +1624,6 @@ struct kfd_process_device *kfd_create_process_device_data(struct kfd_node *dev,
 	idr_init(&pdd->alloc_idr);
 
 	return pdd;
-
-err_free_pdd:
-	kfree(pdd);
-	return NULL;
 }
 
 /**
@@ -1666,7 +1667,7 @@ int kfd_process_device_init_vm(struct kfd_process_device *pdd,
 						     &p->kgd_process_info,
 						     &p->ef);
 	if (ret) {
-		pr_err("Failed to create process VM object\n");
+		dev_err(dev->adev->dev, "Failed to create process VM object\n");
 		return ret;
 	}
 	pdd->drm_priv = drm_file->private_data;
@@ -1713,7 +1714,7 @@ struct kfd_process_device *kfd_bind_process_to_device(struct kfd_node *dev,
 
 	pdd = kfd_get_process_device_data(dev, p);
 	if (!pdd) {
-		pr_err("Process device data doesn't exist\n");
+		dev_err(dev->adev->dev, "Process device data doesn't exist\n");
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -1823,6 +1824,7 @@ int kfd_process_evict_queues(struct kfd_process *p, uint32_t trigger)
 
 	for (i = 0; i < p->n_pdds; i++) {
 		struct kfd_process_device *pdd = p->pdds[i];
+		struct device *dev = pdd->dev->adev->dev;
 
 		kfd_smi_event_queue_eviction(pdd->dev, p->lead_thread->pid,
 					     trigger);
@@ -1834,7 +1836,7 @@ int kfd_process_evict_queues(struct kfd_process *p, uint32_t trigger)
 		 * them been add back since they actually not be saved right now.
 		 */
 		if (r && r != -EIO) {
-			pr_err("Failed to evict process queues\n");
+			dev_err(dev, "Failed to evict process queues\n");
 			goto fail;
 		}
 		n_evicted++;
@@ -1856,7 +1858,8 @@ fail:
 
 		if (pdd->dev->dqm->ops.restore_process_queues(pdd->dev->dqm,
 							      &pdd->qpd))
-			pr_err("Failed to restore queues\n");
+			dev_err(pdd->dev->adev->dev,
+				"Failed to restore queues\n");
 
 		n_evicted--;
 	}
@@ -1872,13 +1875,14 @@ int kfd_process_restore_queues(struct kfd_process *p)
 
 	for (i = 0; i < p->n_pdds; i++) {
 		struct kfd_process_device *pdd = p->pdds[i];
+		struct device *dev = pdd->dev->adev->dev;
 
 		kfd_smi_event_queue_restore(pdd->dev, p->lead_thread->pid);
 
 		r = pdd->dev->dqm->ops.restore_process_queues(pdd->dev->dqm,
 							      &pdd->qpd);
 		if (r) {
-			pr_err("Failed to restore process queues\n");
+			dev_err(dev, "Failed to restore process queues\n");
 			if (!ret)
 				ret = r;
 		}
@@ -2038,7 +2042,7 @@ int kfd_reserved_mem_mmap(struct kfd_node *dev, struct kfd_process *process,
 	struct qcm_process_device *qpd;
 
 	if ((vma->vm_end - vma->vm_start) != KFD_CWSR_TBA_TMA_SIZE) {
-		pr_err("Incorrect CWSR mapping size.\n");
+		dev_err(dev->adev->dev, "Incorrect CWSR mapping size.\n");
 		return -EINVAL;
 	}
 
@@ -2050,7 +2054,8 @@ int kfd_reserved_mem_mmap(struct kfd_node *dev, struct kfd_process *process,
 	qpd->cwsr_kaddr = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
 					get_order(KFD_CWSR_TBA_TMA_SIZE));
 	if (!qpd->cwsr_kaddr) {
-		pr_err("Error allocating per process CWSR buffer.\n");
+		dev_err(dev->adev->dev,
+			"Error allocating per process CWSR buffer.\n");
 		return -ENOMEM;
 	}
 

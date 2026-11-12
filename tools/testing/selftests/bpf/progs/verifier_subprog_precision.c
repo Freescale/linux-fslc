@@ -141,7 +141,7 @@ __msg("mark_precise: frame0: last_idx 14 first_idx 9")
 __msg("mark_precise: frame0: regs=r6 stack= before 13: (bf) r1 = r7")
 __msg("mark_precise: frame0: regs=r6 stack= before 12: (27) r6 *= 4")
 __msg("mark_precise: frame0: regs=r6 stack= before 11: (25) if r6 > 0x3 goto pc+4")
-__msg("mark_precise: frame0: regs=r6 stack= before 10: (bf) r6 = r0")
+__msg("mark_precise: frame0: regs=r0,r6 stack= before 10: (bf) r6 = r0")
 __msg("mark_precise: frame0: regs=r0 stack= before 9: (85) call bpf_loop")
 /* State entering callback body popped from states stack */
 __msg("from 9 to 17: frame1:")
@@ -150,9 +150,9 @@ __msg("17: (b7) r0 = 0")
 __msg("18: (95) exit")
 __msg("returning from callee:")
 __msg("to caller at 9:")
-__msg("frame 0: propagating r1,r4")
+__msg("frame 0: propagating r1,r3,r4")
 __msg("mark_precise: frame0: last_idx 9 first_idx 9 subseq_idx -1")
-__msg("mark_precise: frame0: regs=r1,r4 stack= before 18: (95) exit")
+__msg("mark_precise: frame0: regs=r1,r3,r4 stack= before 18: (95) exit")
 __msg("from 18 to 9: safe")
 __naked int callback_result_precise(void)
 {
@@ -282,9 +282,9 @@ __msg("to caller at 9:")
 /* r1, r4 are always precise for bpf_loop(),
  * r6 was marked before backtracking to callback body.
  */
-__msg("frame 0: propagating r1,r4,r6")
+__msg("frame 0: propagating r1,r3,r4,r6")
 __msg("mark_precise: frame0: last_idx 9 first_idx 9 subseq_idx -1")
-__msg("mark_precise: frame0: regs=r1,r4,r6 stack= before 16: (95) exit")
+__msg("mark_precise: frame0: regs=r1,r3,r4,r6 stack= before 16: (95) exit")
 __msg("mark_precise: frame1: regs= stack= before 15: (b7) r0 = 0")
 __msg("mark_precise: frame1: regs= stack= before 9: (85) call bpf_loop")
 __msg("mark_precise: frame0: parent state regs= stack=:")
@@ -440,9 +440,9 @@ __msg("to caller at 10:")
 /* r1, r4 are always precise for bpf_loop(),
  * fp-8 was marked before backtracking to callback body.
  */
-__msg("frame 0: propagating r1,r4,fp-8")
+__msg("frame 0: propagating r1,r3,r4,fp-8")
 __msg("mark_precise: frame0: last_idx 10 first_idx 10 subseq_idx -1")
-__msg("mark_precise: frame0: regs=r1,r4 stack=-8 before 18: (95) exit")
+__msg("mark_precise: frame0: regs=r1,r3,r4 stack=-8 before 18: (95) exit")
 __msg("mark_precise: frame1: regs= stack= before 17: (b7) r0 = 0")
 __msg("mark_precise: frame1: regs= stack= before 10: (85) call bpf_loop#181")
 __msg("mark_precise: frame0: parent state regs= stack=:")
@@ -541,11 +541,24 @@ static __u64 subprog_spill_reg_precise(void)
 
 SEC("?raw_tp")
 __success __log_level(2)
-/* precision backtracking can't currently handle stack access not through r10,
- * so we won't be able to mark stack slot fp-8 as precise, and so will
- * fallback to forcing all as precise
- */
-__msg("mark_precise: frame0: falling back to forcing all scalars precise")
+__msg("10: (0f) r1 += r7")
+__msg("mark_precise: frame0: last_idx 10 first_idx 7 subseq_idx -1")
+__msg("mark_precise: frame0: regs=r7 stack= before 9: (bf) r1 = r8")
+__msg("mark_precise: frame0: regs=r7 stack= before 8: (27) r7 *= 4")
+__msg("mark_precise: frame0: regs=r7 stack= before 7: (79) r7 = *(u64 *)(r10 -8)")
+__msg("mark_precise: frame0: parent state regs= stack=-8:  R0_w=2 R6_w=1 R8_rw=map_value(off=0,ks=4,vs=16,imm=0) R10=fp0 fp-8_rw=P1")
+__msg("mark_precise: frame0: last_idx 18 first_idx 0 subseq_idx 7")
+__msg("mark_precise: frame0: regs= stack=-8 before 18: (95) exit")
+__msg("mark_precise: frame1: regs= stack= before 17: (0f) r0 += r2")
+__msg("mark_precise: frame1: regs= stack= before 16: (79) r2 = *(u64 *)(r1 +0)")
+__msg("mark_precise: frame1: regs= stack= before 15: (79) r0 = *(u64 *)(r10 -16)")
+__msg("mark_precise: frame1: regs= stack= before 14: (7b) *(u64 *)(r10 -16) = r2")
+__msg("mark_precise: frame1: regs= stack= before 13: (7b) *(u64 *)(r1 +0) = r2")
+__msg("mark_precise: frame1: regs=r2 stack= before 6: (85) call pc+6")
+__msg("mark_precise: frame0: regs=r2 stack= before 5: (bf) r2 = r6")
+__msg("mark_precise: frame0: regs=r6 stack= before 4: (07) r1 += -8")
+__msg("mark_precise: frame0: regs=r6 stack= before 3: (bf) r1 = r10")
+__msg("mark_precise: frame0: regs=r6 stack= before 2: (b7) r6 = 1")
 __naked int subprog_spill_into_parent_stack_slot_precise(void)
 {
 	asm volatile (
@@ -580,14 +593,68 @@ __naked int subprog_spill_into_parent_stack_slot_precise(void)
 	);
 }
 
-__naked __noinline __used
-static __u64 subprog_with_checkpoint(void)
+SEC("?raw_tp")
+__success __log_level(2)
+__msg("17: (0f) r1 += r0")
+__msg("mark_precise: frame0: last_idx 17 first_idx 0 subseq_idx -1")
+__msg("mark_precise: frame0: regs=r0 stack= before 16: (bf) r1 = r7")
+__msg("mark_precise: frame0: regs=r0 stack= before 15: (27) r0 *= 4")
+__msg("mark_precise: frame0: regs=r0 stack= before 14: (79) r0 = *(u64 *)(r10 -16)")
+__msg("mark_precise: frame0: regs= stack=-16 before 13: (7b) *(u64 *)(r7 -8) = r0")
+__msg("mark_precise: frame0: regs=r0 stack= before 12: (79) r0 = *(u64 *)(r8 +16)")
+__msg("mark_precise: frame0: regs= stack=-16 before 11: (7b) *(u64 *)(r8 +16) = r0")
+__msg("mark_precise: frame0: regs=r0 stack= before 10: (79) r0 = *(u64 *)(r7 -8)")
+__msg("mark_precise: frame0: regs= stack=-16 before 9: (7b) *(u64 *)(r10 -16) = r0")
+__msg("mark_precise: frame0: regs=r0 stack= before 8: (07) r8 += -32")
+__msg("mark_precise: frame0: regs=r0 stack= before 7: (bf) r8 = r10")
+__msg("mark_precise: frame0: regs=r0 stack= before 6: (07) r7 += -8")
+__msg("mark_precise: frame0: regs=r0 stack= before 5: (bf) r7 = r10")
+__msg("mark_precise: frame0: regs=r0 stack= before 21: (95) exit")
+__msg("mark_precise: frame1: regs=r0 stack= before 20: (bf) r0 = r1")
+__msg("mark_precise: frame1: regs=r1 stack= before 4: (85) call pc+15")
+__msg("mark_precise: frame0: regs=r1 stack= before 3: (bf) r1 = r6")
+__msg("mark_precise: frame0: regs=r6 stack= before 2: (b7) r6 = 1")
+__naked int stack_slot_aliases_precision(void)
 {
 	asm volatile (
-		"r0 = 0;"
-		/* guaranteed checkpoint if BPF_F_TEST_STATE_FREQ is used */
-		"goto +0;"
+		"r6 = 1;"
+		/* pass r6 through r1 into subprog to get it back as r0;
+		 * this whole chain will have to be marked as precise later
+		 */
+		"r1 = r6;"
+		"call identity_subprog;"
+		/* let's setup two registers that are aliased to r10 */
+		"r7 = r10;"
+		"r7 += -8;"			/* r7 = r10 - 8 */
+		"r8 = r10;"
+		"r8 += -32;"			/* r8 = r10 - 32 */
+		/* now spill subprog's return value (a r6 -> r1 -> r0 chain)
+		 * a few times through different stack pointer regs, making
+		 * sure to use r10, r7, and r8 both in LDX and STX insns, and
+		 * *importantly* also using a combination of const var_off and
+		 * insn->off to validate that we record final stack slot
+		 * correctly, instead of relying on just insn->off derivation,
+		 * which is only valid for r10-based stack offset
+		 */
+		"*(u64 *)(r10 - 16) = r0;"
+		"r0 = *(u64 *)(r7 - 8);"	/* r7 - 8 == r10 - 16 */
+		"*(u64 *)(r8 + 16) = r0;"	/* r8 + 16 = r10 - 16 */
+		"r0 = *(u64 *)(r8 + 16);"
+		"*(u64 *)(r7 - 8) = r0;"
+		"r0 = *(u64 *)(r10 - 16);"
+		/* get ready to use r0 as an index into array to force precision */
+		"r0 *= 4;"
+		"r1 = %[vals];"
+		/* here r0->r1->r6 chain is forced to be precise and has to be
+		 * propagated back to the beginning, including through the
+		 * subprog call and all the stack spills and loads
+		 */
+		"r1 += r0;"
+		"r0 = *(u32 *)(r1 + 0);"
 		"exit;"
+		:
+		: __imm_ptr(vals)
+		: __clobber_common, "r6"
 	);
 }
 

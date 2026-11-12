@@ -36,7 +36,7 @@ void nvmet_bdev_set_limits(struct block_device *bdev, struct nvme_id_ns *id)
 	 */
 	id->nsfeat |= 1 << 4;
 	/* NPWG = Namespace Preferred Write Granularity. 0's based */
-	id->npwg = lpp0b;
+	id->npwg = to0based(bdev_io_min(bdev) / bdev_logical_block_size(bdev));
 	/* NPWA = Namespace Preferred Write Alignment. 0's based */
 	id->npwa = id->npwg;
 	/* NPDG = Namespace Preferred Deallocate Granularity. 0's based */
@@ -133,11 +133,11 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 	 */
 	switch (blk_sts) {
 	case BLK_STS_NOSPC:
-		status = NVME_SC_CAP_EXCEEDED | NVME_SC_DNR;
+		status = NVME_SC_CAP_EXCEEDED | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_rw_command, length);
 		break;
 	case BLK_STS_TARGET:
-		status = NVME_SC_LBA_RANGE | NVME_SC_DNR;
+		status = NVME_SC_LBA_RANGE | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_rw_command, slba);
 		break;
 	case BLK_STS_NOTSUPP:
@@ -145,10 +145,10 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 		switch (req->cmd->common.opcode) {
 		case nvme_cmd_dsm:
 		case nvme_cmd_write_zeroes:
-			status = NVME_SC_ONCS_NOT_SUPPORTED | NVME_SC_DNR;
+			status = NVME_SC_ONCS_NOT_SUPPORTED | NVME_STATUS_DNR;
 			break;
 		default:
-			status = NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+			status = NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 		}
 		break;
 	case BLK_STS_MEDIUM:
@@ -157,7 +157,7 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 		break;
 	case BLK_STS_IOERR:
 	default:
-		status = NVME_SC_INTERNAL | NVME_SC_DNR;
+		status = NVME_SC_INTERNAL | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_common_command, opcode);
 	}
 
@@ -354,7 +354,7 @@ u16 nvmet_bdev_flush(struct nvmet_req *req)
 		return 0;
 
 	if (blkdev_issue_flush(req->ns->bdev))
-		return NVME_SC_INTERNAL | NVME_SC_DNR;
+		return NVME_SC_INTERNAL | NVME_STATUS_DNR;
 	return 0;
 }
 

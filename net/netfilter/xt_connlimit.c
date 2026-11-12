@@ -31,8 +31,6 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	struct net *net = xt_net(par);
 	const struct xt_connlimit_info *info = par->matchinfo;
-	struct nf_conntrack_tuple tuple;
-	const struct nf_conntrack_tuple *tuple_ptr = &tuple;
 	const struct nf_conntrack_zone *zone = &nf_ct_zone_dflt;
 	enum ip_conntrack_info ctinfo;
 	const struct nf_conn *ct;
@@ -40,13 +38,8 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	u32 key[5];
 
 	ct = nf_ct_get(skb, &ctinfo);
-	if (ct != NULL) {
-		tuple_ptr = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
+	if (ct)
 		zone = nf_ct_zone(ct);
-	} else if (!nf_ct_get_tuplepr(skb, skb_network_offset(skb),
-				      xt_family(par), net, &tuple)) {
-		goto hotdrop;
-	}
 
 	if (xt_family(par) == NFPROTO_IPV6) {
 		const struct ipv6hdr *iph = ipv6_hdr(skb);
@@ -69,10 +62,9 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		key[1] = zone->id;
 	}
 
-	connections = nf_conncount_count(net, info->data, key, tuple_ptr,
-					 zone);
+	connections = nf_conncount_count_skb(net, skb, xt_family(par), info->data, key);
 	if (connections == 0)
-		/* kmalloc failed, drop it entirely */
+		/* kmalloc failed or tuple couldn't be found, drop it entirely */
 		goto hotdrop;
 
 	return (connections > info->limit) ^ !!(info->flags & XT_CONNLIMIT_INVERT);
@@ -106,26 +98,41 @@ static void connlimit_mt_destroy(const struct xt_mtdtor_param *par)
 	nf_conncount_destroy(par->net, par->family, info->data);
 }
 
-static struct xt_match connlimit_mt_reg __read_mostly = {
-	.name       = "connlimit",
-	.revision   = 1,
-	.family     = NFPROTO_UNSPEC,
-	.checkentry = connlimit_mt_check,
-	.match      = connlimit_mt,
-	.matchsize  = sizeof(struct xt_connlimit_info),
-	.usersize   = offsetof(struct xt_connlimit_info, data),
-	.destroy    = connlimit_mt_destroy,
-	.me         = THIS_MODULE,
+static struct xt_match connlimit_mt_reg[] __read_mostly = {
+	{
+		.name       = "connlimit",
+		.revision   = 1,
+		.family     = NFPROTO_IPV4,
+		.checkentry = connlimit_mt_check,
+		.match      = connlimit_mt,
+		.matchsize  = sizeof(struct xt_connlimit_info),
+		.usersize   = offsetof(struct xt_connlimit_info, data),
+		.destroy    = connlimit_mt_destroy,
+		.me         = THIS_MODULE,
+	},
+#if IS_ENABLED(CONFIG_IP6_NF_IPTABLES)
+	{
+		.name       = "connlimit",
+		.revision   = 1,
+		.family     = NFPROTO_IPV6,
+		.checkentry = connlimit_mt_check,
+		.match      = connlimit_mt,
+		.matchsize  = sizeof(struct xt_connlimit_info),
+		.usersize   = offsetof(struct xt_connlimit_info, data),
+		.destroy    = connlimit_mt_destroy,
+		.me         = THIS_MODULE,
+	},
+#endif
 };
 
 static int __init connlimit_mt_init(void)
 {
-	return xt_register_match(&connlimit_mt_reg);
+	return xt_register_matches(connlimit_mt_reg, ARRAY_SIZE(connlimit_mt_reg));
 }
 
 static void __exit connlimit_mt_exit(void)
 {
-	xt_unregister_match(&connlimit_mt_reg);
+	xt_unregister_matches(connlimit_mt_reg, ARRAY_SIZE(connlimit_mt_reg));
 }
 
 module_init(connlimit_mt_init);

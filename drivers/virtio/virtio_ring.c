@@ -1412,7 +1412,7 @@ static inline int virtqueue_add_packed(struct virtqueue *_vq,
 	struct scatterlist *sg;
 	unsigned int i, n, c, descs_used, err_idx;
 	__le16 head_flags, flags;
-	u16 head, id, prev, curr, avail_used_flags;
+	u16 head, id, prev, curr, avail_used_flags, unpub_flags;
 	int err;
 
 	START_USE(vq);
@@ -1535,15 +1535,30 @@ unmap_release:
 	curr = vq->free_head;
 
 	vq->packed.avail_used_flags = avail_used_flags;
+	unpub_flags = avail_used_flags ^ (1 << VRING_PACKED_DESC_F_AVAIL |
+					  1 << VRING_PACKED_DESC_F_USED);
 
 	for (n = 0; n < total_sg; n++) {
 		if (i == err_idx)
 			break;
+		/*
+		 * The mapping loop made every descriptor but the head
+		 * available. Stamp the previous wrap counter's AVAIL and USED
+		 * bits on those, so that a later and shorter chain at this head
+		 * does not leave one of them available beyond its own last
+		 * descriptor. Marking them used instead would hand
+		 * is_used_desc_packed() a completion we never made.
+		 */
+		if (i != head)
+			desc[i].flags = cpu_to_le16(unpub_flags);
 		vring_unmap_extra_packed(vq, &vq->packed.desc_extra[curr]);
 		curr = vq->packed.desc_extra[curr].next;
 		i++;
-		if (i >= vq->packed.vring.num)
+		if (i >= vq->packed.vring.num) {
 			i = 0;
+			unpub_flags ^= 1 << VRING_PACKED_DESC_F_AVAIL |
+				       1 << VRING_PACKED_DESC_F_USED;
+		}
 	}
 
 	END_USE(vq);
@@ -2530,7 +2545,7 @@ bool virtqueue_enable_cb_delayed(struct virtqueue *_vq)
 	struct vring_virtqueue *vq = to_vvq(_vq);
 
 	if (vq->event_triggered)
-		vq->event_triggered = false;
+		data_race(vq->event_triggered = false);
 
 	return vq->packed_ring ? virtqueue_enable_cb_delayed_packed(_vq) :
 				 virtqueue_enable_cb_delayed_split(_vq);
@@ -2739,7 +2754,7 @@ int virtqueue_resize(struct virtqueue *_vq, u32 num,
 		     void (*recycle)(struct virtqueue *vq, void *buf))
 {
 	struct vring_virtqueue *vq = to_vvq(_vq);
-	int err;
+	int err, err_reset;
 
 	if (num > vq->vq.num_max)
 		return -E2BIG;
@@ -2759,7 +2774,11 @@ int virtqueue_resize(struct virtqueue *_vq, u32 num,
 	else
 		err = virtqueue_resize_split(_vq, num);
 
-	return virtqueue_enable_after_reset(_vq);
+	err_reset = virtqueue_enable_after_reset(_vq);
+	if (err_reset)
+		return err_reset;
+
+	return err;
 }
 EXPORT_SYMBOL_GPL(virtqueue_resize);
 

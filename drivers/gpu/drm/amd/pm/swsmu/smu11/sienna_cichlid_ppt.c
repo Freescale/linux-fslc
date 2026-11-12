@@ -1989,8 +1989,6 @@ static void sienna_cichlid_get_unique_id(struct smu_context *smu)
 out:
 
 	adev->unique_id = ((uint64_t)upper32 << 32) | lower32;
-	if (adev->serial[0] == '\0')
-		sprintf(adev->serial, "%016llx", adev->unique_id);
 }
 
 static int sienna_cichlid_get_uclk_dpm_states(struct smu_context *smu, uint32_t *clocks_in_khz, uint32_t *num_states)
@@ -2082,7 +2080,9 @@ static int sienna_cichlid_display_disable_memory_clock_switch(struct smu_context
 	return ret;
 }
 
+#ifndef MAX
 #define MAX(a, b)	((a) > (b) ? (a) : (b))
+#endif
 
 static int sienna_cichlid_update_pcie_parameters(struct smu_context *smu,
 						 uint8_t pcie_gen_cap,

@@ -89,11 +89,6 @@ nvkm_falcon_fw_boot(struct nvkm_falcon_fw *fw, struct nvkm_subdev *user,
 		nvkm_falcon_fw_dtor_sigs(fw);
 	}
 
-	/* after last write to the img, sync dma mappings */
-	dma_sync_single_for_device(fw->fw.device->dev,
-				   fw->fw.phys,
-				   sg_dma_len(&fw->fw.mem.sgl),
-				   DMA_TO_DEVICE);
 
 	FLCNFW_DBG(fw, "resetting");
 	fw->func->reset(fw);
@@ -104,6 +99,12 @@ nvkm_falcon_fw_boot(struct nvkm_falcon_fw *fw, struct nvkm_subdev *user,
 		if (ret)
 			goto done;
 	}
+
+	/* after last write to the img, sync dma mappings */
+	dma_sync_single_for_device(fw->fw.device->dev,
+				   fw->fw.phys,
+				   sg_dma_len(&fw->fw.mem.sgl),
+				   DMA_TO_DEVICE);
 
 	ret = fw->func->load(fw);
 	if (ret)
@@ -158,6 +159,8 @@ nvkm_falcon_fw_dtor(struct nvkm_falcon_fw *fw)
 	nvkm_memory_unref(&fw->inst);
 	nvkm_falcon_fw_dtor_sigs(fw);
 	nvkm_firmware_dtor(&fw->fw);
+	kfree(fw->boot);
+	fw->boot = NULL;
 }
 
 static const struct nvkm_firmware_func

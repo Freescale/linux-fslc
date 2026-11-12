@@ -14,7 +14,7 @@
 #include <linux/clk.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
-#include <linux/mfd/dbx500-prcmu.h>
+#include <linux/mfd/db8500-prcmu.h>
 
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
@@ -34,8 +34,10 @@ static int setup_pcm_multichan(struct snd_soc_dai *dai,
 	if (drvdata->slots > 1) {
 		msp_config->multichannel_configured = 1;
 
-		multi->tx_multichannel_enable = true;
-		multi->rx_multichannel_enable = true;
+		multi->tx_multichannel_enable =
+			msp_config->direction & MSP_DIR_TX;
+		multi->rx_multichannel_enable =
+			msp_config->direction & MSP_DIR_RX;
 		multi->rx_comparison_enable_mode = MSP_COMPARISON_DISABLED;
 
 		multi->tx_channel_0_enable = drvdata->tx_mask;
@@ -57,72 +59,21 @@ static int setup_pcm_multichan(struct snd_soc_dai *dai,
 	return 0;
 }
 
-static int setup_frameper(struct snd_soc_dai *dai, unsigned int rate,
-			struct msp_protdesc *prot_desc)
+static void setup_frameper(struct snd_soc_dai *dai,
+			   struct msp_protdesc *prot_desc)
 {
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 
-	switch (drvdata->slots) {
-	case 1:
-		switch (rate) {
-		case 8000:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_8_KHZ;
-			break;
-
-		case 16000:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_16_KHZ;
-			break;
-
-		case 44100:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_44_1_KHZ;
-			break;
-
-		case 48000:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_48_KHZ;
-			break;
-
-		default:
-			dev_err(dai->dev,
-				"%s: Error: Unsupported sample-rate (freq = %d)!\n",
-				__func__, rate);
-			return -EINVAL;
-		}
-		break;
-
-	case 2:
-		prot_desc->frame_period = FRAME_PER_2_SLOTS;
-		break;
-
-	case 8:
-		prot_desc->frame_period = FRAME_PER_8_SLOTS;
-		break;
-
-	case 16:
-		prot_desc->frame_period = FRAME_PER_16_SLOTS;
-		break;
-	default:
-		dev_err(dai->dev,
-			"%s: Error: Unsupported slot-count (slots = %d)!\n",
-			__func__, drvdata->slots);
-		return -EINVAL;
-	}
-
-	prot_desc->clocks_per_frame =
-			prot_desc->frame_period+1;
+	prot_desc->clocks_per_frame = drvdata->slots * drvdata->slot_width;
+	prot_desc->frame_period = prot_desc->clocks_per_frame - 1;
 
 	dev_dbg(dai->dev, "%s: Clocks per frame: %u\n",
 		__func__,
 		prot_desc->clocks_per_frame);
-
-	return 0;
 }
 
-static int setup_pcm_framing(struct snd_soc_dai *dai, unsigned int rate,
-			struct msp_protdesc *prot_desc)
+static int setup_pcm_framing(struct snd_soc_dai *dai,
+			     struct msp_protdesc *prot_desc)
 {
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 
@@ -163,7 +114,9 @@ static int setup_pcm_framing(struct snd_soc_dai *dai, unsigned int rate,
 	prot_desc->tx_elem_len_2 = MSP_ELEM_LEN_16;
 	prot_desc->rx_elem_len_2 = MSP_ELEM_LEN_16;
 
-	return setup_frameper(dai, rate, prot_desc);
+	setup_frameper(dai, prot_desc);
+
+	return 0;
 }
 
 static int setup_clocking(struct snd_soc_dai *dai,
@@ -177,7 +130,16 @@ static int setup_clocking(struct snd_soc_dai *dai,
 	case SND_SOC_DAIFMT_NB_IF:
 		msp_config->tx_fsync_pol ^= 1 << TFSPOL_SHIFT;
 		msp_config->rx_fsync_pol ^= 1 << RFSPOL_SHIFT;
+		break;
 
+	case SND_SOC_DAIFMT_IB_NF:
+		msp_config->bclk_inverted = true;
+		break;
+
+	case SND_SOC_DAIFMT_IB_IF:
+		msp_config->bclk_inverted = true;
+		msp_config->tx_fsync_pol ^= 1 << TFSPOL_SHIFT;
+		msp_config->rx_fsync_pol ^= 1 << RFSPOL_SHIFT;
 		break;
 
 	default:
@@ -192,6 +154,7 @@ static int setup_clocking(struct snd_soc_dai *dai,
 	case SND_SOC_DAIFMT_BC_FC:
 		dev_dbg(dai->dev, "%s: Codec is master.\n", __func__);
 
+		msp_config->clock_provider = false;
 		msp_config->iodelay = 0x20;
 		msp_config->rx_fsync_sel = 0;
 		msp_config->tx_fsync_sel = 1 << TFSSEL_SHIFT;
@@ -204,6 +167,7 @@ static int setup_clocking(struct snd_soc_dai *dai,
 	case SND_SOC_DAIFMT_BP_FP:
 		dev_dbg(dai->dev, "%s: Codec is slave.\n", __func__);
 
+		msp_config->clock_provider = true;
 		msp_config->tx_clk_sel = TX_CLK_SEL_SRG;
 		msp_config->tx_fsync_sel = TX_SYNC_SRG_PROG;
 		msp_config->rx_clk_sel = RX_CLK_SEL_SRG;
@@ -362,7 +326,7 @@ static int setup_msp_config(struct snd_pcm_substream *substream,
 		if (ret < 0)
 			return ret;
 
-		ret = setup_pcm_framing(dai, runtime->rate, prot_desc);
+		ret = setup_pcm_framing(dai, prot_desc);
 		if (ret < 0)
 			return ret;
 
@@ -464,7 +428,9 @@ static int ux500_msp_dai_prepare(struct snd_pcm_substream *substream,
 	dev_dbg(dai->dev, "%s: MSP %d (%s): Enter (rate = %d).\n", __func__,
 		dai->id, snd_pcm_stream_str(substream), runtime->rate);
 
-	setup_msp_config(substream, dai, &msp_config);
+	ret = setup_msp_config(substream, dai, &msp_config);
+	if (ret)
+		return ret;
 
 	ret = ux500_msp_i2s_open(drvdata->msp, &msp_config);
 	if (ret < 0) {
@@ -496,7 +462,6 @@ static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	unsigned int mask, slots_active;
-	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 
 	dev_dbg(dai->dev, "%s: MSP %d (%s): Enter.\n",
@@ -504,9 +469,8 @@ static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
 
 	switch (drvdata->fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_I2S:
-		snd_pcm_hw_constraint_minmax(runtime,
-				SNDRV_PCM_HW_PARAM_CHANNELS,
-				1, 2);
+		if (params_channels(params) < 1 || params_channels(params) > 2)
+			return -EINVAL;
 		break;
 
 	case SND_SOC_DAIFMT_DSP_B:
@@ -518,9 +482,8 @@ static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
 		slots_active = hweight32(mask);
 		dev_dbg(dai->dev, "TDM-slots active: %d", slots_active);
 
-		snd_pcm_hw_constraint_single(runtime,
-				SNDRV_PCM_HW_PARAM_CHANNELS,
-				slots_active);
+		if (!slots_active || params_channels(params) != slots_active)
+			return -EINVAL;
 		break;
 
 	default:
@@ -553,20 +516,21 @@ static int ux500_msp_dai_set_dai_fmt(struct snd_soc_dai *dai,
 	default:
 		dev_err(dai->dev,
 			"%s: Error: Unsupported protocol/master (fmt = 0x%x)!\n",
-			__func__, drvdata->fmt);
+			__func__, fmt);
 		return -EINVAL;
 	}
 
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
 	case SND_SOC_DAIFMT_NB_NF:
 	case SND_SOC_DAIFMT_NB_IF:
+	case SND_SOC_DAIFMT_IB_NF:
 	case SND_SOC_DAIFMT_IB_IF:
 		break;
 
 	default:
 		dev_err(dai->dev,
 			"%s: Error: Unsupported inversion (fmt = 0x%x)!\n",
-			__func__, drvdata->fmt);
+			__func__, fmt);
 		return -EINVAL;
 	}
 
@@ -600,17 +564,23 @@ static int ux500_msp_dai_set_tdm_slot(struct snd_soc_dai *dai,
 			__func__, slots);
 		return -EINVAL;
 	}
-	drvdata->slots = slots;
 
-	if (!(slot_width == 16)) {
+	if (slot_width != 16) {
 		dev_err(dai->dev, "%s: Error: Unsupported slot-width (%d)!\n",
 			__func__, slot_width);
 		return -EINVAL;
 	}
-	drvdata->slot_width = slot_width;
 
-	drvdata->tx_mask = tx_mask & cap;
-	drvdata->rx_mask = rx_mask & cap;
+	if ((tx_mask | rx_mask) & ~cap) {
+		dev_err(dai->dev, "%s: Slot mask exceeds %d slots\n",
+			__func__, slots);
+		return -EINVAL;
+	}
+
+	drvdata->slots = slots;
+	drvdata->slot_width = slot_width;
+	drvdata->tx_mask = tx_mask;
+	drvdata->rx_mask = rx_mask;
 
 	return 0;
 }
@@ -729,7 +699,6 @@ static int ux500_msp_drv_probe(struct platform_device *pdev)
 	drvdata->tx_mask = 0x01;
 	drvdata->rx_mask = 0x01;
 	drvdata->slot_width = 16;
-	drvdata->master_clk = MSP_INPUT_FREQ_APB;
 
 	drvdata->reg_vape = devm_regulator_get(&pdev->dev, "v-ape");
 	if (IS_ERR(drvdata->reg_vape)) {
@@ -758,9 +727,14 @@ static int ux500_msp_drv_probe(struct platform_device *pdev)
 			__func__, ret);
 		return ret;
 	}
+	drvdata->master_clk = clk_get_rate(drvdata->clk);
+	if (!drvdata->master_clk) {
+		dev_err(&pdev->dev, "MSP clock has no rate\n");
+		return -EINVAL;
+	}
 
 	ret = ux500_msp_i2s_init_msp(pdev, &drvdata->msp);
-	if (!drvdata->msp) {
+	if (ret) {
 		dev_err(&pdev->dev,
 			"%s: ERROR: Failed to init MSP-struct (%d)!",
 			__func__, ret);

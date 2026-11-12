@@ -227,6 +227,7 @@ static int sctp_v6_xmit(struct sk_buff *skb, struct sctp_transport *t)
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	__u8 tclass = np->tclass;
 	__be32 label;
+	int err;
 
 	pr_debug("%s: skb:%p, len:%d, src:%pI6 dst:%pI6\n", __func__, skb,
 		 skb->len, &fl6->saddr, &fl6->daddr);
@@ -263,9 +264,12 @@ static int sctp_v6_xmit(struct sk_buff *skb, struct sctp_transport *t)
 	skb_set_inner_ipproto(skb, IPPROTO_SCTP);
 	label = ip6_make_flowlabel(sock_net(sk), skb, fl6->flowlabel, true, fl6);
 
-	return udp_tunnel6_xmit_skb(dst, sk, skb, NULL, &fl6->saddr,
-				    &fl6->daddr, tclass, ip6_dst_hoplimit(dst),
-				    label, sctp_sk(sk)->udp_port, t->encap_port, false);
+	local_bh_disable();
+	err = udp_tunnel6_xmit_skb(dst, sk, skb, NULL, &fl6->saddr,
+				   &fl6->daddr, tclass, ip6_dst_hoplimit(dst),
+				   label, sctp_sk(sk)->udp_port, t->encap_port, false);
+	local_bh_enable();
+	return err;
 }
 
 /* Returns the dst cache entry for the given source and destination ip
@@ -416,7 +420,7 @@ out:
 	if (!IS_ERR_OR_NULL(dst)) {
 		struct rt6_info *rt;
 
-		rt = (struct rt6_info *)dst;
+		rt = dst_rt6_info(dst);
 		t->dst_cookie = rt6_get_cookie(rt);
 		pr_debug("rt6_dst:%pI6/%d rt6_src:%pI6\n",
 			 &rt->rt6i_dst.addr, rt->rt6i_dst.plen,
@@ -547,7 +551,9 @@ static void sctp_v6_from_sk(union sctp_addr *addr, struct sock *sk)
 {
 	addr->v6.sin6_family = AF_INET6;
 	addr->v6.sin6_port = 0;
+	addr->v6.sin6_flowinfo = 0;
 	addr->v6.sin6_addr = sk->sk_v6_rcv_saddr;
+	addr->v6.sin6_scope_id = 0;
 }
 
 /* Initialize sk->sk_rcv_saddr from sctp_addr. */
@@ -684,7 +690,7 @@ static int sctp_v6_available(union sctp_addr *addr, struct sctp_sock *sp)
 	struct sock *sk = &sp->inet.sk;
 	struct net *net = sock_net(sk);
 	struct net_device *dev = NULL;
-	int type;
+	int type, res, bound_dev_if;
 
 	type = ipv6_addr_type(in6);
 	if (IPV6_ADDR_ANY == type)
@@ -698,14 +704,21 @@ static int sctp_v6_available(union sctp_addr *addr, struct sctp_sock *sp)
 	if (!(type & IPV6_ADDR_UNICAST))
 		return 0;
 
-	if (sk->sk_bound_dev_if) {
-		dev = dev_get_by_index_rcu(net, sk->sk_bound_dev_if);
+	rcu_read_lock();
+	bound_dev_if = READ_ONCE(sk->sk_bound_dev_if);
+	if (bound_dev_if) {
+		res = 0;
+		dev = dev_get_by_index_rcu(net, bound_dev_if);
 		if (!dev)
-			return 0;
+			goto out;
 	}
 
-	return ipv6_can_nonlocal_bind(net, &sp->inet) ||
-	       ipv6_chk_addr(net, in6, dev, 0);
+	res = ipv6_can_nonlocal_bind(net, &sp->inet) ||
+	      ipv6_chk_addr(net, in6, dev, 0);
+
+out:
+	rcu_read_unlock();
+	return res;
 }
 
 /* This function checks if the address is a valid address to be used for
@@ -1212,11 +1225,17 @@ void sctp_v6_protosw_exit(void)
 /* Register with inet6 layer. */
 int sctp_v6_add_protocol(void)
 {
-	/* Register notifier for inet6 address additions/deletions. */
-	register_inet6addr_notifier(&sctp_inet6addr_notifier);
+	int ret;
 
-	if (inet6_add_protocol(&sctpv6_protocol, IPPROTO_SCTP) < 0)
+	/* Register notifier for inet6 address additions/deletions. */
+	ret = register_inet6addr_notifier(&sctp_inet6addr_notifier);
+	if (ret)
+		return ret;
+
+	if (inet6_add_protocol(&sctpv6_protocol, IPPROTO_SCTP) < 0) {
+		unregister_inet6addr_notifier(&sctp_inet6addr_notifier);
 		return -EAGAIN;
+	}
 
 	return 0;
 }

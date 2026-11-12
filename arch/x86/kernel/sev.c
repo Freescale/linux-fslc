@@ -688,11 +688,13 @@ static void __head
 early_set_pages_state(unsigned long vaddr, unsigned long paddr,
 		      unsigned long npages, enum psc_op op)
 {
-	unsigned long paddr_end;
+	unsigned long vaddr_begin, paddr_end;
 	u64 val;
 	int ret;
 
 	vaddr = vaddr & PAGE_MASK;
+
+	vaddr_begin = vaddr;
 
 	paddr = paddr & PAGE_MASK;
 	paddr_end = paddr + (npages << PAGE_SHIFT);
@@ -735,6 +737,13 @@ early_set_pages_state(unsigned long vaddr, unsigned long paddr,
 		vaddr += PAGE_SIZE;
 		paddr += PAGE_SIZE;
 	}
+
+	/*
+	 * If validating memory (making it private) and affected by the
+	 * cache-coherency vulnerability, perform the cache eviction mitigation.
+	 */
+	if (op == SNP_PAGE_STATE_PRIVATE && !cpu_feature_enabled(X86_FEATURE_COHERENCY_SFW_NO))
+		sev_evict_cache((void *)vaddr_begin, npages);
 
 	return;
 
@@ -1740,7 +1749,10 @@ static enum es_result vc_handle_exitcode(struct es_em_ctxt *ctxt,
 					 struct ghcb *ghcb,
 					 unsigned long exit_code)
 {
-	enum es_result result;
+	enum es_result result = vc_check_opcode_bytes(ctxt, exit_code);
+
+	if (result != ES_OK)
+		return result;
 
 	switch (exit_code) {
 	case SVM_EXIT_READ_DR7:

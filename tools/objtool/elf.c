@@ -22,8 +22,6 @@
 #include <objtool/elf.h>
 #include <objtool/warn.h>
 
-#define MAX_NAME_LEN 128
-
 static inline u32 str_hash(const char *str)
 {
 	return jhash(str, strlen(str), 0);
@@ -110,7 +108,7 @@ struct symbol_hole {
 };
 
 /*
- * Find !section symbol where @offset is after it.
+ * Find the last symbol before @offset.
  */
 static int symbol_hole_by_offset(const void *key, const struct rb_node *node)
 {
@@ -121,8 +119,7 @@ static int symbol_hole_by_offset(const void *key, const struct rb_node *node)
 		return -1;
 
 	if (sh->key >= s->offset + s->len) {
-		if (s->type != STT_SECTION)
-			sh->sym = s;
+		sh->sym = s;
 		return 1;
 	}
 
@@ -410,7 +407,8 @@ static void elf_add_symbol(struct elf *elf, struct symbol *sym)
 	sym->len = sym->sym.st_size;
 
 	__sym_for_each(iter, &sym->sec->symbol_tree, sym->offset, sym->offset) {
-		if (iter->offset == sym->offset && iter->type == sym->type)
+		if (iter->offset == sym->offset && iter->type == sym->type &&
+		    iter->len == sym->len)
 			iter->alias = sym;
 	}
 
@@ -515,7 +513,7 @@ static int read_symbols(struct elf *elf)
 	/* Create parent/child links for any cold subfunctions */
 	list_for_each_entry(sec, &elf->sections, list) {
 		sec_for_each_sym(sec, sym) {
-			char pname[MAX_NAME_LEN + 1];
+			char *pname;
 			size_t pnamelen;
 			if (sym->type != STT_FUNC)
 				continue;
@@ -531,15 +529,15 @@ static int read_symbols(struct elf *elf)
 				continue;
 
 			pnamelen = coldstr - sym->name;
-			if (pnamelen > MAX_NAME_LEN) {
-				WARN("%s(): parent function name exceeds maximum length of %d characters",
-				     sym->name, MAX_NAME_LEN);
+			pname = strndup(sym->name, pnamelen);
+			if (!pname) {
+				WARN("%s(): failed to allocate memory",
+				     sym->name);
 				return -1;
 			}
 
-			strncpy(pname, sym->name, pnamelen);
-			pname[pnamelen] = '\0';
 			pfunc = find_symbol_by_name(elf, pname);
+			free(pname);
 
 			if (!pfunc) {
 				WARN("%s(): can't find parent function",

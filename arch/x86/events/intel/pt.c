@@ -827,11 +827,13 @@ static void pt_buffer_advance(struct pt_buffer *buf)
 	buf->cur_idx++;
 
 	if (buf->cur_idx == buf->cur->last) {
-		if (buf->cur == buf->last)
+		if (buf->cur == buf->last) {
 			buf->cur = buf->first;
-		else
+			buf->wrapped = true;
+		} else {
 			buf->cur = list_entry(buf->cur->list.next, struct topa,
 					      list);
+		}
 		buf->cur_idx = 0;
 	}
 }
@@ -845,7 +847,10 @@ static void pt_buffer_advance(struct pt_buffer *buf)
 static void pt_update_head(struct pt *pt)
 {
 	struct pt_buffer *buf = perf_get_aux(&pt->handle);
+	bool wrapped = buf->wrapped;
 	u64 topa_idx, base, old;
+
+	buf->wrapped = false;
 
 	if (buf->single) {
 		local_set(&buf->data_size, buf->output_off);
@@ -864,7 +869,7 @@ static void pt_update_head(struct pt *pt)
 	} else {
 		old = (local64_xchg(&buf->head, base) &
 		       ((buf->nr_pages << PAGE_SHIFT) - 1));
-		if (base < old)
+		if (base < old || (base == old && wrapped))
 			base += buf->nr_pages << PAGE_SHIFT;
 
 		local_add(base - old, &buf->data_size);
@@ -1501,12 +1506,14 @@ void intel_pt_interrupt(void)
 
 	perf_aux_output_end(&pt->handle, local_xchg(&buf->data_size, 0));
 
-	if (!event->hw.state) {
+	event->hw.state |= PERF_HES_UPTODATE;
+
+	if (!(event->hw.state & PERF_HES_STOPPED)) {
 		int ret;
 
 		buf = perf_aux_output_begin(&pt->handle, event);
 		if (!buf) {
-			event->hw.state = PERF_HES_STOPPED;
+			event->hw.state |= PERF_HES_STOPPED;
 			return;
 		}
 
@@ -1520,6 +1527,8 @@ void intel_pt_interrupt(void)
 
 		pt_config_buffer(buf);
 		pt_config_start(event);
+
+		event->hw.state &= ~PERF_HES_UPTODATE;
 	}
 }
 
@@ -1569,6 +1578,19 @@ static void pt_event_start(struct perf_event *event, int mode)
 	struct pt *pt = this_cpu_ptr(&pt_ctx);
 	struct pt_buffer *buf;
 
+	/*
+	 * Re-start subsequent to a call to pt_event_stop() without the
+	 * PERF_EF_UPDATE flag. Absence of PERF_HES_UPTODATE indicates that
+	 * perf_aux_output_begin() has already been called. This path can
+	 * come about only in snapshot/overwrite mode - see pt_event_stop().
+	 */
+	if (!(hwc->state & PERF_HES_UPTODATE)) {
+		hwc->state &= ~PERF_HES_STOPPED;
+		WRITE_ONCE(pt->handle_nmi, 1);
+		pt_config_start(event);
+		return;
+	}
+
 	buf = perf_aux_output_begin(&pt->handle, event);
 	if (!buf)
 		goto fail_stop;
@@ -1580,7 +1602,7 @@ static void pt_event_start(struct perf_event *event, int mode)
 	}
 
 	WRITE_ONCE(pt->handle_nmi, 1);
-	hwc->state = 0;
+	hwc->state &= ~(PERF_HES_STOPPED | PERF_HES_UPTODATE);
 
 	pt_config_buffer(buf);
 	pt_config(event);
@@ -1590,32 +1612,41 @@ static void pt_event_start(struct perf_event *event, int mode)
 fail_end_stop:
 	perf_aux_output_end(&pt->handle, 0);
 fail_stop:
-	hwc->state = PERF_HES_STOPPED;
+	hwc->state |= PERF_HES_STOPPED | PERF_HES_UPTODATE;
 }
 
 static void pt_event_stop(struct perf_event *event, int mode)
 {
 	struct pt *pt = this_cpu_ptr(&pt_ctx);
+	struct pt_buffer *buf;
 
 	/*
 	 * Protect against the PMI racing with disabling wrmsr,
 	 * see comment in intel_pt_interrupt().
 	 */
 	WRITE_ONCE(pt->handle_nmi, 0);
+	barrier();
 
 	pt_config_stop(event);
 
-	if (event->hw.state == PERF_HES_STOPPED)
+	event->hw.state |= PERF_HES_STOPPED;
+
+	if (event->hw.state & PERF_HES_UPTODATE)
 		return;
 
-	event->hw.state = PERF_HES_STOPPED;
+	buf = perf_get_aux(&pt->handle);
+	if (!buf)
+		return;
 
-	if (mode & PERF_EF_UPDATE) {
-		struct pt_buffer *buf = perf_get_aux(&pt->handle);
-
-		if (!buf)
-			return;
-
+	/*
+	 * When not in snapshot/overwrite mode, there is a possibility that the
+	 * buffer has run out of space. The accounting for that is handled by
+	 * the update, so always update in that case. Snapshot/overwrite mode is
+	 * treated differently to allow for pt_event_snapshot_aux() which can
+	 * still get called if the AUX-sampling event is not stopped until after
+	 * PT is stopped.
+	 */
+	if ((mode & PERF_EF_UPDATE) || !buf->snapshot) {
 		if (WARN_ON_ONCE(pt->handle.event != event))
 			return;
 
@@ -1630,6 +1661,7 @@ static void pt_event_stop(struct perf_event *event, int mode)
 				local_xchg(&buf->data_size,
 					   buf->nr_pages << PAGE_SHIFT);
 		perf_aux_output_end(&pt->handle, local_xchg(&buf->data_size, 0));
+		event->hw.state |= PERF_HES_UPTODATE;
 	}
 }
 
@@ -1653,11 +1685,10 @@ static long pt_event_snapshot_aux(struct perf_event *event,
 		return 0;
 
 	/*
-	 * Here, handle_nmi tells us if the tracing is on
+	 * There is no PT interrupt in this mode, so stop the trace and it will
+	 * remain stopped while the buffer is copied.
 	 */
-	if (READ_ONCE(pt->handle_nmi))
-		pt_config_stop(event);
-
+	pt_config_stop(event);
 	pt_read_offset(buf);
 	pt_update_head(pt);
 
@@ -1669,11 +1700,10 @@ static long pt_event_snapshot_aux(struct perf_event *event,
 	ret = perf_output_copy_aux(&pt->handle, handle, from, to);
 
 	/*
-	 * If the tracing was on when we turned up, restart it.
-	 * Compiler barrier not needed as we couldn't have been
-	 * preempted by anything that touches pt->handle_nmi.
+	 * Here, handle_nmi tells us if the tracing was on.
+	 * If the tracing was on, restart it.
 	 */
-	if (pt->handle_nmi)
+	if (READ_ONCE(pt->handle_nmi))
 		pt_config_start(event);
 
 	return ret;
@@ -1693,13 +1723,15 @@ static int pt_event_add(struct perf_event *event, int mode)
 	if (pt->handle.event)
 		goto fail;
 
+	event->hw.state |= PERF_HES_UPTODATE;
+
 	if (mode & PERF_EF_START) {
 		pt_event_start(event, 0);
 		ret = -EINVAL;
-		if (hwc->state == PERF_HES_STOPPED)
+		if (hwc->state & PERF_HES_STOPPED)
 			goto fail;
 	} else {
-		hwc->state = PERF_HES_STOPPED;
+		hwc->state |= PERF_HES_STOPPED;
 	}
 
 	ret = 0;

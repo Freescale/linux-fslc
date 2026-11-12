@@ -88,17 +88,33 @@ struct nfsd4_callback_ops {
  */
 struct nfs4_stid {
 	refcount_t		sc_count;
-#define NFS4_OPEN_STID 1
-#define NFS4_LOCK_STID 2
-#define NFS4_DELEG_STID 4
-/* For an open stateid kept around *only* to process close replays: */
-#define NFS4_CLOSED_STID 8
+
+	/* A new stateid is added to the cl_stateids idr early before it
+	 * is fully initialised.  Its sc_type is then zero.  After
+	 * initialisation the sc_type it set under cl_lock, and then
+	 * never changes.
+	 */
+#define SC_TYPE_OPEN		BIT(0)
+#define SC_TYPE_LOCK		BIT(1)
+#define SC_TYPE_DELEG		BIT(2)
+#define SC_TYPE_LAYOUT		BIT(3)
+	unsigned short		sc_type;
+
+/* state_lock protects sc_status for delegation stateids.
+ * ->cl_lock protects sc_status for open and lock stateids.
+ * ->st_mutex also protect sc_status for open stateids.
+ * ->ls_lock protects sc_status for layout stateids.
+ */
+/*
+ * For an open stateid kept around *only* to process close replays.
+ * For deleg stateid, kept in idr until last reference is dropped.
+ */
+#define SC_STATUS_CLOSED	BIT(0)
 /* For a deleg stateid kept around only to process free_stateid's: */
-#define NFS4_REVOKED_DELEG_STID 16
-#define NFS4_CLOSED_DELEG_STID 32
-#define NFS4_LAYOUT_STID 64
+#define SC_STATUS_REVOKED	BIT(1)
+	unsigned short		sc_status;
+
 	struct list_head	sc_cp_list;
-	unsigned char		sc_type;
 	stateid_t		sc_stateid;
 	spinlock_t		sc_lock;
 	struct nfs4_client	*sc_client;
@@ -430,11 +446,18 @@ struct nfs4_client_reclaim {
 	struct xdr_netobj	cr_princhash;
 };
 
-/* A reasonable value for REPLAY_ISIZE was estimated as follows:  
- * The OPEN response, typically the largest, requires 
- *   4(status) + 8(stateid) + 20(changeinfo) + 4(rflags) +  8(verifier) + 
- *   4(deleg. type) + 8(deleg. stateid) + 4(deleg. recall flag) + 
- *   20(deleg. space limit) + ~32(deleg. ace) = 112 bytes 
+/*
+ * REPLAY_ISIZE is sized for an OPEN response with delegation:
+ *   4(status) + 8(stateid) + 20(changeinfo) + 4(rflags) +
+ *   8(verifier) + 4(deleg. type) + 8(deleg. stateid) +
+ *   4(deleg. recall flag) + 20(deleg. space limit) +
+ *   ~32(deleg. ace) = 112 bytes
+ *
+ * Some responses can exceed this. A LOCK denial includes the conflicting
+ * lock owner, which can be up to 1024 bytes (NFS4_OPAQUE_LIMIT). Responses
+ * larger than REPLAY_ISIZE are not cached in rp_ibuf; only rp_status is
+ * saved. Enlarging this constant increases the size of every
+ * nfs4_stateowner.
  */
 
 #define NFSD4_REPLAY_ISIZE       112 
@@ -674,15 +697,15 @@ extern __be32 nfs4_preprocess_stateid_op(struct svc_rqst *rqstp,
 		stateid_t *stateid, int flags, struct nfsd_file **filp,
 		struct nfs4_stid **cstid);
 __be32 nfsd4_lookup_stateid(struct nfsd4_compound_state *cstate,
-		     stateid_t *stateid, unsigned char typemask,
-		     struct nfs4_stid **s, struct nfsd_net *nn);
+			    stateid_t *stateid, unsigned short typemask,
+			    unsigned short statusmask,
+			    struct nfs4_stid **s, struct nfsd_net *nn);
 struct nfs4_stid *nfs4_alloc_stid(struct nfs4_client *cl, struct kmem_cache *slab,
 				  void (*sc_free)(struct nfs4_stid *));
 int nfs4_init_copy_state(struct nfsd_net *nn, struct nfsd4_copy *copy);
 void nfs4_free_copy_state(struct nfsd4_copy *copy);
 struct nfs4_cpntf_state *nfs4_alloc_init_cpntf_state(struct nfsd_net *nn,
 			struct nfs4_stid *p_stid);
-void nfs4_unhash_stid(struct nfs4_stid *s);
 void nfs4_put_stid(struct nfs4_stid *s);
 void nfs4_inc_and_copy_stateid(stateid_t *dst, struct nfs4_stid *stid);
 void nfs4_remove_reclaim_record(struct nfs4_client_reclaim *, struct nfsd_net *);
@@ -717,7 +740,7 @@ static inline void get_nfs4_file(struct nfs4_file *fi)
 struct nfsd_file *find_any_file(struct nfs4_file *f);
 
 /* grace period management */
-void nfsd4_end_grace(struct nfsd_net *nn);
+bool nfsd4_force_end_grace(struct nfsd_net *nn);
 
 /* nfs4recover operations */
 extern int nfsd4_client_tracking_init(struct net *net);

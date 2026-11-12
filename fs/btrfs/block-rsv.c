@@ -324,10 +324,25 @@ void btrfs_block_rsv_add_bytes(struct btrfs_block_rsv *block_rsv,
 void btrfs_update_global_block_rsv(struct btrfs_fs_info *fs_info)
 {
 	struct btrfs_block_rsv *block_rsv = &fs_info->global_block_rsv;
-	struct btrfs_space_info *sinfo = block_rsv->space_info;
+	struct btrfs_space_info *sinfo;
 	struct btrfs_root *root, *tmp;
-	u64 num_bytes = btrfs_root_used(&fs_info->tree_root->root_item);
 	unsigned int min_items = 1;
+	u64 num_bytes;
+
+	/*
+	 * A full read-only mount (rescue options) cannot start transactions,
+	 * so the global reserve is never consumed. Mark it as full and skip
+	 * the accounting.
+	 */
+	if (btrfs_is_full_ro(fs_info)) {
+		spin_lock(&block_rsv->lock);
+		block_rsv->full = true;
+		spin_unlock(&block_rsv->lock);
+		return;
+	}
+
+	sinfo = block_rsv->space_info;
+	num_bytes = btrfs_root_used(&fs_info->tree_root->root_item);
 
 	/*
 	 * The global block rsv is based on the size of the extent tree, the
@@ -351,6 +366,11 @@ void btrfs_update_global_block_rsv(struct btrfs_fs_info *fs_info)
 
 	if (btrfs_fs_compat_ro(fs_info, BLOCK_GROUP_TREE)) {
 		num_bytes += btrfs_root_used(&fs_info->block_group_root->root_item);
+		min_items++;
+	}
+
+	if (btrfs_fs_incompat(fs_info, RAID_STRIPE_TREE)) {
+		num_bytes += btrfs_root_used(&fs_info->stripe_root->root_item);
 		min_items++;
 	}
 
@@ -405,6 +425,7 @@ void btrfs_init_root_block_rsv(struct btrfs_root *root)
 	case BTRFS_EXTENT_TREE_OBJECTID:
 	case BTRFS_FREE_SPACE_TREE_OBJECTID:
 	case BTRFS_BLOCK_GROUP_TREE_OBJECTID:
+	case BTRFS_RAID_STRIPE_TREE_OBJECTID:
 		root->block_rsv = &fs_info->delayed_refs_rsv;
 		break;
 	case BTRFS_ROOT_TREE_OBJECTID:
@@ -547,7 +568,7 @@ try_reserve:
 	return ERR_PTR(ret);
 }
 
-int btrfs_check_trunc_cache_free_space(struct btrfs_fs_info *fs_info,
+int btrfs_check_trunc_cache_free_space(const struct btrfs_fs_info *fs_info,
 				       struct btrfs_block_rsv *rsv)
 {
 	u64 needed_bytes;

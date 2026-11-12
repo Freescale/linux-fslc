@@ -27,8 +27,14 @@ int rxrpc_encap_rcv(struct sock *udp_sk, struct sk_buff *skb)
 {
 	struct sk_buff_head *rx_queue;
 	struct rxrpc_local *local = rcu_dereference_sk_user_data(udp_sk);
+	struct task_struct *io_thread;
 
 	if (unlikely(!local)) {
+		kfree_skb(skb);
+		return 0;
+	}
+	io_thread = READ_ONCE(local->io_thread);
+	if (!io_thread) {
 		kfree_skb(skb);
 		return 0;
 	}
@@ -47,7 +53,7 @@ int rxrpc_encap_rcv(struct sock *udp_sk, struct sk_buff *skb)
 #endif
 
 	skb_queue_tail(rx_queue, skb);
-	rxrpc_wake_up_io_thread(local);
+	wake_up_process(io_thread);
 	return 0;
 }
 
@@ -161,13 +167,12 @@ static bool rxrpc_extract_abort(struct sk_buff *skb)
 /*
  * Process packets received on the local endpoint
  */
-static bool rxrpc_input_packet(struct rxrpc_local *local, struct sk_buff **_skb)
+static bool rxrpc_input_packet(struct rxrpc_local *local, struct sk_buff *skb)
 {
 	struct rxrpc_connection *conn;
 	struct sockaddr_rxrpc peer_srx;
 	struct rxrpc_skb_priv *sp;
 	struct rxrpc_peer *peer = NULL;
-	struct sk_buff *skb = *_skb;
 	bool ret = false;
 
 	skb_pull(skb, sizeof(struct udphdr));
@@ -213,25 +218,6 @@ static bool rxrpc_input_packet(struct rxrpc_local *local, struct sk_buff **_skb)
 			return rxrpc_bad_message(skb, rxrpc_badmsg_zero_call);
 		if (sp->hdr.seq == 0)
 			return rxrpc_bad_message(skb, rxrpc_badmsg_zero_seq);
-
-		/* Unshare the packet so that it can be modified for in-place
-		 * decryption.
-		 */
-		if (sp->hdr.securityIndex != 0) {
-			skb = skb_unshare(skb, GFP_ATOMIC);
-			if (!skb) {
-				rxrpc_eaten_skb(*_skb, rxrpc_skb_eaten_by_unshare_nomem);
-				*_skb = NULL;
-				return just_discard;
-			}
-
-			if (skb != *_skb) {
-				rxrpc_eaten_skb(*_skb, rxrpc_skb_eaten_by_unshare);
-				*_skb = skb;
-				rxrpc_new_skb(skb, rxrpc_skb_new_unshared);
-				sp = rxrpc_skb(skb);
-			}
-		}
 		break;
 
 	case RXRPC_PACKET_TYPE_CHALLENGE:
@@ -383,7 +369,8 @@ static int rxrpc_input_packet_on_conn(struct rxrpc_connection *conn,
 
 	if (sp->hdr.callNumber > chan->call_id) {
 		if (rxrpc_to_client(sp)) {
-			rxrpc_put_call(call, rxrpc_call_put_input);
+			if (call)
+				rxrpc_put_call(call, rxrpc_call_put_input);
 			return rxrpc_protocol_error(skb,
 						    rxrpc_eproto_unexpected_implicit_end);
 		}
@@ -436,9 +423,9 @@ int rxrpc_io_thread(void *data)
 						struct rxrpc_connection,
 						attend_link);
 		if (conn) {
-			spin_lock_bh(&local->lock);
+			spin_lock_irq(&local->lock);
 			list_del_init(&conn->attend_link);
-			spin_unlock_bh(&local->lock);
+			spin_unlock_irq(&local->lock);
 
 			rxrpc_input_conn_event(conn, NULL);
 			rxrpc_put_connection(conn, rxrpc_conn_put_poke);
@@ -453,9 +440,9 @@ int rxrpc_io_thread(void *data)
 		if ((call = list_first_entry_or_null(&local->call_attend_q,
 						     struct rxrpc_call,
 						     attend_link))) {
-			spin_lock_bh(&local->lock);
+			spin_lock_irq(&local->lock);
 			list_del_init(&call->attend_link);
-			spin_unlock_bh(&local->lock);
+			spin_unlock_irq(&local->lock);
 
 			trace_rxrpc_call_poked(call);
 			rxrpc_input_call_event(call, NULL);
@@ -472,7 +459,7 @@ int rxrpc_io_thread(void *data)
 			switch (skb->mark) {
 			case RXRPC_SKB_MARK_PACKET:
 				skb->priority = 0;
-				if (!rxrpc_input_packet(local, &skb))
+				if (!rxrpc_input_packet(local, skb))
 					rxrpc_reject_packet(local, skb);
 				trace_rxrpc_rx_done(skb->mark, skb->priority);
 				rxrpc_free_skb(skb, rxrpc_skb_put_input);
@@ -554,7 +541,7 @@ int rxrpc_io_thread(void *data)
 	__set_current_state(TASK_RUNNING);
 	rxrpc_see_local(local, rxrpc_local_stop);
 	rxrpc_destroy_local(local);
-	local->io_thread = NULL;
+	WRITE_ONCE(local->io_thread, NULL);
 	rxrpc_see_local(local, rxrpc_local_stopped);
 	return 0;
 }

@@ -100,6 +100,9 @@ void ib_enum_all_roce_netdevs(roce_netdev_filter filter,
 			      roce_netdev_callback cb,
 			      void *cookie);
 
+void ib_device_enable_gid_updates(struct ib_device *device);
+void ib_device_disable_gid_updates(struct ib_device *device);
+
 typedef int (*nldev_callback)(struct ib_device *device,
 			      struct sk_buff *skb,
 			      struct netlink_callback *cb,
@@ -373,4 +376,5 @@ void rdma_umap_priv_init(struct rdma_umap_priv *priv,
 
 void ib_cq_pool_cleanup(struct ib_device *dev);
 
+bool rdma_nl_get_privileged_qkey(void);
 #endif /* _CORE_PRIV_H */

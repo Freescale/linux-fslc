@@ -106,6 +106,9 @@ struct sched_domain {
 	unsigned int nr_balance_failed; /* initialise to 0 */
 
 	/* idle_balance() stats */
+	unsigned int newidle_call;
+	unsigned int newidle_success;
+	unsigned int newidle_ratio;
 	u64 max_newidle_lb_cost;
 	unsigned long last_decay_max_lb_cost;
 
@@ -273,6 +276,14 @@ static __always_inline
 void arch_update_thermal_pressure(const struct cpumask *cpus,
 				  unsigned long capped_frequency)
 { }
+#endif
+
+#ifndef arch_scale_freq_ref
+static __always_inline
+unsigned int arch_scale_freq_ref(int cpu)
+{
+	return 0;
+}
 #endif
 
 static inline int task_node(const struct task_struct *p)

@@ -319,32 +319,6 @@ extern unsigned long pci_io_base;
 
 #ifndef __ASSEMBLY__
 
-/*
- * This is the default implementation of various PTE accessors, it's
- * used in all cases except Book3S with 64K pages where we have a
- * concept of sub-pages
- */
-#ifndef __real_pte
-
-#define __real_pte(e, p, o)		((real_pte_t){(e)})
-#define __rpte_to_pte(r)	((r).pte)
-#define __rpte_to_hidx(r,index)	(pte_val(__rpte_to_pte(r)) >> H_PAGE_F_GIX_SHIFT)
-
-#define pte_iterate_hashed_subpages(rpte, psize, va, index, shift)       \
-	do {							         \
-		index = 0;					         \
-		shift = mmu_psize_defs[psize].shift;		         \
-
-#define pte_iterate_hashed_end() } while(0)
-
-/*
- * We expect this to be called only for user addresses or kernel virtual
- * addresses other than the linear mapping.
- */
-#define pte_pagesize_index(mm, addr, pte)	MMU_PAGE_4K
-
-#endif /* __real_pte */
-
 static inline unsigned long pte_update(struct mm_struct *mm, unsigned long addr,
 				       pte_t *ptep, unsigned long clr,
 				       unsigned long set, int huge)
@@ -1354,6 +1328,22 @@ extern int pudp_test_and_clear_young(struct vm_area_struct *vma,
 static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm,
 					    unsigned long addr, pmd_t *pmdp)
 {
+	pmd_t old_pmd;
+
+	/*
+	 * Non-present PMDs can be migration entries or device-private THP
+	 * entries. This can happen at 2 places:
+	 * - When the address space is being unmapped zap_huge_pmd(), and we
+	 *   encounter non-present pmds.
+	 * - migrate_vma_collect_huge_pmd() could calls this during migration
+	 *   of device-private pmd entries.
+	 */
+	if (!pmd_present(*pmdp)) {
+		old_pmd = READ_ONCE(*pmdp);
+		pmd_clear(pmdp);
+		return old_pmd;
+	}
+
 	if (radix_enabled())
 		return radix__pmdp_huge_get_and_clear(mm, addr, pmdp);
 	return hash__pmdp_huge_get_and_clear(mm, addr, pmdp);

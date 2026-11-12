@@ -329,7 +329,7 @@ nouveau_uvma_region_create(struct nouveau_uvmm *uvmm,
 	struct nouveau_uvma_region *reg;
 	int ret;
 
-	if (!drm_gpuva_interval_empty(&uvmm->umgr, addr, range))
+	if (!drm_gpuvm_interval_empty(&uvmm->umgr, addr, range))
 		return -ENOSPC;
 
 	ret = nouveau_uvma_region_alloc(&reg);
@@ -384,7 +384,7 @@ nouveau_uvma_region_empty(struct nouveau_uvma_region *reg)
 {
 	struct nouveau_uvmm *uvmm = reg->uvmm;
 
-	return drm_gpuva_interval_empty(&uvmm->umgr,
+	return drm_gpuvm_interval_empty(&uvmm->umgr,
 					reg->va.addr,
 					reg->va.range);
 }
@@ -444,7 +444,7 @@ op_map_prepare_unwind(struct nouveau_uvma *uvma)
 static void
 op_unmap_prepare_unwind(struct drm_gpuva *va)
 {
-	drm_gpuva_insert(va->mgr, va);
+	drm_gpuva_insert(va->vm, va);
 }
 
 static void
@@ -771,6 +771,9 @@ static void
 op_map(struct nouveau_uvma *uvma)
 {
 	struct nouveau_bo *nvbo = nouveau_gem_object(uvma->va.gem.obj);
+
+	if (drm_gpuva_invalidated(&uvma->va))
+		return;
 
 	nouveau_uvma_map(uvma, nouveau_mem(nvbo->bo.resource));
 }
@@ -1191,14 +1194,16 @@ nouveau_uvmm_bind_job_submit(struct nouveau_job *job)
 							   op->va.range);
 			if (!op->reg || op->reg->dirty) {
 				ret = -ENOENT;
+				op->reg = NULL;
 				goto unwind_continue;
 			}
 
-			op->ops = drm_gpuva_sm_unmap_ops_create(&uvmm->umgr,
+			op->ops = drm_gpuvm_sm_unmap_ops_create(&uvmm->umgr,
 								op->va.addr,
 								op->va.range);
 			if (IS_ERR(op->ops)) {
 				ret = PTR_ERR(op->ops);
+				op->reg = NULL;
 				goto unwind_continue;
 			}
 
@@ -1240,7 +1245,7 @@ nouveau_uvmm_bind_job_submit(struct nouveau_job *job)
 				}
 			}
 
-			op->ops = drm_gpuva_sm_map_ops_create(&uvmm->umgr,
+			op->ops = drm_gpuvm_sm_map_ops_create(&uvmm->umgr,
 							      op->va.addr,
 							      op->va.range,
 							      op->gem.obj,
@@ -1264,7 +1269,7 @@ nouveau_uvmm_bind_job_submit(struct nouveau_job *job)
 			break;
 		}
 		case OP_UNMAP:
-			op->ops = drm_gpuva_sm_unmap_ops_create(&uvmm->umgr,
+			op->ops = drm_gpuvm_sm_unmap_ops_create(&uvmm->umgr,
 								op->va.addr,
 								op->va.range);
 			if (IS_ERR(op->ops)) {
@@ -1332,6 +1337,13 @@ nouveau_uvmm_bind_job_submit(struct nouveau_job *job)
 				continue;
 
 			nvbo = nouveau_gem_object(obj);
+			if (!(nvbo->valid_domains &
+			      (NOUVEAU_GEM_DOMAIN_VRAM | NOUVEAU_GEM_DOMAIN_GART))) {
+				ret = -EINVAL;
+				op = list_last_op(&bind_job->ops);
+				goto unwind;
+			}
+
 			nouveau_bo_placement_set(nvbo, nvbo->valid_domains, 0);
 			ret = nouveau_bo_validate(nvbo, true, false);
 			if (ret) {
@@ -1390,6 +1402,7 @@ unwind:
 						    op->va.range);
 			break;
 		case OP_UNMAP_SPARSE:
+			op->reg->dirty = false;
 			__nouveau_uvma_region_insert(uvmm, op->reg);
 			nouveau_uvmm_sm_unmap_prepare_unwind(uvmm, &op->new,
 							     op->ops);
@@ -1406,7 +1419,8 @@ unwind:
 			break;
 		}
 
-		drm_gpuva_ops_free(&uvmm->umgr, op->ops);
+		if (!IS_ERR_OR_NULL(op->ops))
+			drm_gpuva_ops_free(&uvmm->umgr, op->ops);
 		op->ops = NULL;
 		op->reg = NULL;
 	}
@@ -1730,10 +1744,10 @@ nouveau_uvmm_vm_bind_ucopy(struct nouveau_uvmm_bind_job_args *args,
 
 	return 0;
 
-err_free_ops:
-	u_free(args->op.s);
 err_free_ins:
 	u_free(args->in_sync.s);
+err_free_ops:
+	u_free(args->op.s);
 	return ret;
 }
 
@@ -1838,11 +1852,11 @@ nouveau_uvmm_init(struct nouveau_uvmm *uvmm, struct nouveau_cli *cli,
 	uvmm->kernel_managed_addr = kernel_managed_addr;
 	uvmm->kernel_managed_size = kernel_managed_size;
 
-	drm_gpuva_manager_init(&uvmm->umgr, cli->name,
-			       NOUVEAU_VA_SPACE_START,
-			       NOUVEAU_VA_SPACE_END,
-			       kernel_managed_addr, kernel_managed_size,
-			       NULL);
+	drm_gpuvm_init(&uvmm->umgr, cli->name,
+		       NOUVEAU_VA_SPACE_START,
+		       NOUVEAU_VA_SPACE_END,
+		       kernel_managed_addr, kernel_managed_size,
+		       NULL);
 
 	ret = nvif_vmm_ctor(&cli->mmu, "uvmm",
 			    cli->vmm.vmm.object.oclass, RAW,
@@ -1857,7 +1871,7 @@ nouveau_uvmm_init(struct nouveau_uvmm *uvmm, struct nouveau_cli *cli,
 	return 0;
 
 out_free_gpuva_mgr:
-	drm_gpuva_manager_destroy(&uvmm->umgr);
+	drm_gpuvm_destroy(&uvmm->umgr);
 out_unlock:
 	mutex_unlock(&cli->mutex);
 	return ret;
@@ -1879,7 +1893,7 @@ nouveau_uvmm_fini(struct nouveau_uvmm *uvmm)
 	wait_event(entity->job.wq, list_empty(&entity->job.list.head));
 
 	nouveau_uvmm_lock(uvmm);
-	drm_gpuva_for_each_va_safe(va, next, &uvmm->umgr) {
+	drm_gpuvm_for_each_va_safe(va, next, &uvmm->umgr) {
 		struct nouveau_uvma *uvma = uvma_from_va(va);
 		struct drm_gem_object *obj = va->gem.obj;
 
@@ -1912,7 +1926,7 @@ nouveau_uvmm_fini(struct nouveau_uvmm *uvmm)
 
 	mutex_lock(&cli->mutex);
 	nouveau_vmm_fini(&uvmm->vmm);
-	drm_gpuva_manager_destroy(&uvmm->umgr);
+	drm_gpuvm_destroy(&uvmm->umgr);
 	mutex_unlock(&cli->mutex);
 
 	dma_resv_fini(&uvmm->resv);

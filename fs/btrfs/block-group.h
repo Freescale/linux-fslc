@@ -250,7 +250,7 @@ struct btrfs_block_group {
 	enum btrfs_block_group_size_class size_class;
 };
 
-static inline u64 btrfs_block_group_end(struct btrfs_block_group *block_group)
+static inline u64 btrfs_block_group_end(const struct btrfs_block_group *block_group)
 {
 	return (block_group->start + block_group->length);
 }
@@ -262,8 +262,7 @@ static inline bool btrfs_is_block_group_used(const struct btrfs_block_group *bg)
 	return (bg->used > 0 || bg->reserved > 0 || bg->pinned > 0);
 }
 
-static inline bool btrfs_is_block_group_data_only(
-					struct btrfs_block_group *block_group)
+static inline bool btrfs_is_block_group_data_only(const struct btrfs_block_group *block_group)
 {
 	/*
 	 * In mixed mode the fragmentation is expected to be high, lowering the
@@ -274,7 +273,7 @@ static inline bool btrfs_is_block_group_data_only(
 }
 
 #ifdef CONFIG_BTRFS_DEBUG
-int btrfs_should_fragment_free_space(struct btrfs_block_group *block_group);
+int btrfs_should_fragment_free_space(const struct btrfs_block_group *block_group);
 #endif
 
 struct btrfs_block_group *btrfs_lookup_first_block_group(
@@ -328,7 +327,8 @@ int btrfs_add_reserved_bytes(struct btrfs_block_group *cache,
 			     bool force_wrong_size_class);
 void btrfs_free_reserved_bytes(struct btrfs_block_group *cache,
 			       u64 num_bytes, int delalloc);
-int btrfs_chunk_alloc(struct btrfs_trans_handle *trans, u64 flags,
+int btrfs_chunk_alloc(struct btrfs_trans_handle *trans,
+		      struct btrfs_space_info *space_info, u64 flags,
 		      enum btrfs_chunk_alloc_enum force);
 int btrfs_force_chunk_alloc(struct btrfs_trans_handle *trans, u64 type);
 void check_system_chunk(struct btrfs_trans_handle *trans, const u64 type);
@@ -355,7 +355,7 @@ static inline u64 btrfs_system_alloc_profile(struct btrfs_fs_info *fs_info)
 	return btrfs_get_alloc_profile(fs_info, BTRFS_BLOCK_GROUP_SYSTEM);
 }
 
-static inline int btrfs_block_group_done(struct btrfs_block_group *cache)
+static inline int btrfs_block_group_done(const struct btrfs_block_group *cache)
 {
 	smp_mb();
 	return cache->cached == BTRFS_CACHE_FINISHED ||
@@ -372,6 +372,6 @@ enum btrfs_block_group_size_class btrfs_calc_block_group_size_class(u64 size);
 int btrfs_use_block_group_size_class(struct btrfs_block_group *bg,
 				     enum btrfs_block_group_size_class size_class,
 				     bool force_wrong_size_class);
-bool btrfs_block_group_should_use_size_class(struct btrfs_block_group *bg);
+bool btrfs_block_group_should_use_size_class(const struct btrfs_block_group *bg);
 
 #endif /* BTRFS_BLOCK_GROUP_H */

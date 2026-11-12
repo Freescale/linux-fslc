@@ -1083,19 +1083,20 @@ static int powernowk8_cpu_init(struct cpufreq_policy *pol)
 
 err_out_exit_acpi:
 	powernow_k8_cpu_exit_acpi(data);
+	kfree(data->powernow_table);
 
 err_out:
 	kfree(data);
 	return -ENODEV;
 }
 
-static int powernowk8_cpu_exit(struct cpufreq_policy *pol)
+static void powernowk8_cpu_exit(struct cpufreq_policy *pol)
 {
 	struct powernow_k8_data *data = per_cpu(powernow_data, pol->cpu);
 	int cpu;
 
 	if (!data)
-		return -EINVAL;
+		return;
 
 	powernow_k8_cpu_exit_acpi(data);
 
@@ -1104,8 +1105,6 @@ static int powernowk8_cpu_exit(struct cpufreq_policy *pol)
 	/* pol->cpus will be empty here, use related_cpus instead. */
 	for_each_cpu(cpu, pol->related_cpus)
 		per_cpu(powernow_data, cpu) = NULL;
-
-	return 0;
 }
 
 static void query_values_on_cpu(void *_err)

@@ -21,6 +21,7 @@
 
 struct aa_sfs_entry aa_sfs_entry_network[] = {
 	AA_SFS_FILE_STRING("af_mask",	AA_SFS_AF_MASK),
+	AA_SFS_FILE_BOOLEAN("tcp-fast-open",		1),
 	{ }
 };
 
@@ -127,9 +128,9 @@ int aa_profile_af_perm(struct aa_profile *profile,
 
 	buffer[0] = cpu_to_be16(family);
 	buffer[1] = cpu_to_be16((u16) type);
-	state = aa_dfa_match_len(rules->policy.dfa, state, (char *) &buffer,
+	state = aa_dfa_match_len(rules->policy->dfa, state, (char *) &buffer,
 				 4);
-	perms = *aa_lookup_perms(&rules->policy, state);
+	perms = *aa_lookup_perms(rules->policy, state);
 	aa_apply_modes_to_perms(profile, &perms);
 
 	return aa_check_perms(profile, &perms, request, ad, audit_net_cb);
@@ -151,7 +152,7 @@ static int aa_label_sk_perm(const struct cred *subj_cred,
 			    const char *op, u32 request,
 			    struct sock *sk)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
 	int error = 0;
 
 	AA_BUG(!label);
@@ -190,8 +191,10 @@ int aa_sock_file_perm(const struct cred *subj_cred, struct aa_label *label,
 		      const char *op, u32 request, struct socket *sock)
 {
 	AA_BUG(!label);
-	AA_BUG(!sock);
-	AA_BUG(!sock->sk);
+
+	/* sock && sock->sk can be NULL for sockets being set up or torn down */
+	if (!sock || !sock->sk)
+		return 0;
 
 	return aa_label_sk_perm(subj_cred, label, op, request, sock->sk);
 }
@@ -214,6 +217,7 @@ static int apparmor_secmark_init(struct aa_secmark *secmark)
 		return PTR_ERR(label);
 
 	secmark->secid = label->secid;
+	aa_put_label(label);
 
 	return 0;
 }

@@ -343,7 +343,7 @@ static inline int cs42l43_pin_set_db(struct cs42l43_pin *priv, unsigned int pin,
 
 	return regmap_update_bits(priv->regmap, CS42L43_GPIO_CTRL2,
 				  CS42L43_GPIO1_DEGLITCH_BYP_MASK << pin,
-				  !!us << pin);
+				  !us << pin);
 }
 
 static int cs42l43_pin_config_get(struct pinctrl_dev *pctldev,
@@ -508,7 +508,7 @@ static void cs42l43_gpio_set(struct gpio_chip *chip, unsigned int offset, int va
 
 static int cs42l43_gpio_direction_in(struct gpio_chip *chip, unsigned int offset)
 {
-	return pinctrl_gpio_direction_input(chip->base + offset);
+	return pinctrl_gpio_direction_input(chip, offset);
 }
 
 static int cs42l43_gpio_direction_out(struct gpio_chip *chip,
@@ -516,7 +516,7 @@ static int cs42l43_gpio_direction_out(struct gpio_chip *chip,
 {
 	cs42l43_gpio_set(chip, offset, value);
 
-	return pinctrl_gpio_direction_output(chip->base + offset);
+	return pinctrl_gpio_direction_output(chip, offset);
 }
 
 static int cs42l43_gpio_add_pin_ranges(struct gpio_chip *chip)
@@ -530,6 +530,11 @@ static int cs42l43_gpio_add_pin_ranges(struct gpio_chip *chip)
 		dev_err(priv->dev, "Failed to add GPIO pin range: %d\n", ret);
 
 	return ret;
+}
+
+static void cs42l43_fwnode_put(void *data)
+{
+	fwnode_handle_put(data);
 }
 
 static int cs42l43_pin_probe(struct platform_device *pdev)
@@ -563,10 +568,19 @@ static int cs42l43_pin_probe(struct platform_device *pdev)
 	priv->gpio_chip.ngpio = CS42L43_NUM_GPIOS;
 
 	if (is_of_node(fwnode)) {
-		fwnode = fwnode_get_named_child_node(fwnode, "pinctrl");
+		struct fwnode_handle *child;
 
-		if (fwnode && !fwnode->dev)
-			fwnode->dev = priv->dev;
+		child = fwnode_get_named_child_node(fwnode, "pinctrl");
+		if (child) {
+			ret = devm_add_action_or_reset(&pdev->dev,
+				cs42l43_fwnode_put, child);
+			if (ret)
+				return ret;
+
+			if (!child->dev)
+				child->dev = priv->dev;
+			fwnode = child;
+		}
 	}
 
 	priv->gpio_chip.fwnode = fwnode;

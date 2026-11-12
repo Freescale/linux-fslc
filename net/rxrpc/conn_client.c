@@ -505,9 +505,10 @@ void rxrpc_connect_client_calls(struct rxrpc_local *local)
 	       ) {
 		struct rxrpc_bundle *bundle = call->bundle;
 
-		spin_lock(&local->client_call_lock);
+		spin_lock_irq(&local->client_call_lock);
 		list_move_tail(&call->wait_link, &bundle->waiting_calls);
-		spin_unlock(&local->client_call_lock);
+		rxrpc_see_call(call, rxrpc_call_see_waiting_call);
+		spin_unlock_irq(&local->client_call_lock);
 
 		if (rxrpc_bundle_has_space(bundle))
 			rxrpc_activate_channels(bundle);
@@ -535,9 +536,9 @@ void rxrpc_expose_client_call(struct rxrpc_call *call)
 			set_bit(RXRPC_CONN_DONT_REUSE, &conn->flags);
 		trace_rxrpc_client(conn, channel, rxrpc_client_exposed);
 
-		spin_lock(&call->peer->lock);
+		spin_lock_irq(&call->peer->lock);
 		hlist_add_head(&call->error_link, &call->peer->error_targets);
-		spin_unlock(&call->peer->lock);
+		spin_unlock_irq(&call->peer->lock);
 	}
 }
 
@@ -577,7 +578,10 @@ void rxrpc_disconnect_client_call(struct rxrpc_bundle *bundle, struct rxrpc_call
 		_debug("call is waiting");
 		ASSERTCMP(call->call_id, ==, 0);
 		ASSERT(!test_bit(RXRPC_CALL_EXPOSED, &call->flags));
+		/* May still be on ->new_client_calls. */
+		spin_lock_irq(&local->client_call_lock);
 		list_del_init(&call->wait_link);
+		spin_unlock_irq(&local->client_call_lock);
 		return;
 	}
 

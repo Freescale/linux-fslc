@@ -17,6 +17,7 @@
 #include <linux/hugetlb.h>
 #include <linux/string_helpers.h>
 #include <linux/memory.h>
+#include <linux/kfence.h>
 
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
@@ -31,6 +32,7 @@
 #include <asm/uaccess.h>
 #include <asm/ultravisor.h>
 #include <asm/set_memory.h>
+#include <asm/kfence.h>
 
 #include <trace/events/thp.h>
 
@@ -293,7 +295,8 @@ static unsigned long next_boundary(unsigned long addr, unsigned long end)
 
 static int __meminit create_physical_mapping(unsigned long start,
 					     unsigned long end,
-					     int nid, pgprot_t _prot)
+					     int nid, pgprot_t _prot,
+					     unsigned long mapping_sz_limit)
 {
 	unsigned long vaddr, addr, mapping_size = 0;
 	bool prev_exec, exec = false;
@@ -301,7 +304,10 @@ static int __meminit create_physical_mapping(unsigned long start,
 	int psize;
 	unsigned long max_mapping_size = memory_block_size;
 
-	if (debug_pagealloc_enabled_or_kfence())
+	if (mapping_sz_limit < max_mapping_size)
+		max_mapping_size = mapping_sz_limit;
+
+	if (debug_pagealloc_enabled())
 		max_mapping_size = PAGE_SIZE;
 
 	start = ALIGN(start, PAGE_SIZE);
@@ -356,14 +362,82 @@ static int __meminit create_physical_mapping(unsigned long start,
 	return 0;
 }
 
+#ifdef CONFIG_KFENCE
+static bool __ro_after_init kfence_early_init = !!CONFIG_KFENCE_SAMPLE_INTERVAL;
+
+static int __init parse_kfence_early_init(char *arg)
+{
+	int val;
+
+	if (get_option(&arg, &val))
+		kfence_early_init = !!val;
+	return 0;
+}
+early_param("kfence.sample_interval", parse_kfence_early_init);
+
+static inline phys_addr_t alloc_kfence_pool(void)
+{
+	phys_addr_t kfence_pool;
+
+	/*
+	 * TODO: Support to enable KFENCE after bootup depends on the ability to
+	 *       split page table mappings. As such support is not currently
+	 *       implemented for radix pagetables, support enabling KFENCE
+	 *       only at system startup for now.
+	 *
+	 *       After support for splitting mappings is available on radix,
+	 *       alloc_kfence_pool() & map_kfence_pool() can be dropped and
+	 *       mapping for __kfence_pool memory can be
+	 *       split during arch_kfence_init_pool().
+	 */
+	if (!kfence_early_init)
+		goto no_kfence;
+
+	kfence_pool = memblock_phys_alloc(KFENCE_POOL_SIZE, PAGE_SIZE);
+	if (!kfence_pool)
+		goto no_kfence;
+
+	memblock_mark_nomap(kfence_pool, KFENCE_POOL_SIZE);
+	return kfence_pool;
+
+no_kfence:
+	disable_kfence();
+	return 0;
+}
+
+static inline void map_kfence_pool(phys_addr_t kfence_pool)
+{
+	if (!kfence_pool)
+		return;
+
+	if (create_physical_mapping(kfence_pool, kfence_pool + KFENCE_POOL_SIZE,
+				    -1, PAGE_KERNEL, PAGE_SIZE))
+		goto err;
+
+	memblock_clear_nomap(kfence_pool, KFENCE_POOL_SIZE);
+	__kfence_pool = __va(kfence_pool);
+	return;
+
+err:
+	memblock_phys_free(kfence_pool, KFENCE_POOL_SIZE);
+	disable_kfence();
+}
+#else
+static inline phys_addr_t alloc_kfence_pool(void) { return 0; }
+static inline void map_kfence_pool(phys_addr_t kfence_pool) { }
+#endif
+
 static void __init radix_init_pgtable(void)
 {
+	phys_addr_t kfence_pool;
 	unsigned long rts_field;
 	phys_addr_t start, end;
 	u64 i;
 
 	/* We don't support slb for radix */
 	slb_set_size(0);
+
+	kfence_pool = alloc_kfence_pool();
 
 	/*
 	 * Create the linear mapping
@@ -381,8 +455,10 @@ static void __init radix_init_pgtable(void)
 		}
 
 		WARN_ON(create_physical_mapping(start, end,
-						-1, PAGE_KERNEL));
+						-1, PAGE_KERNEL, ~0UL));
 	}
+
+	map_kfence_pool(kfence_pool);
 
 	if (!cpu_has_feature(CPU_FTR_HVMODE) &&
 			cpu_has_feature(CPU_FTR_P9_RADIX_PREFETCH_BUG)) {
@@ -875,7 +951,7 @@ int __meminit radix__create_section_mapping(unsigned long start,
 	}
 
 	return create_physical_mapping(__pa(start), __pa(end),
-				       nid, prot);
+				       nid, prot, ~0UL);
 }
 
 int __meminit radix__remove_section_mapping(unsigned long start, unsigned long end)
@@ -912,7 +988,7 @@ int __meminit radix__vmemmap_create_mapping(unsigned long start,
 	return 0;
 }
 
-
+#ifdef CONFIG_ARCH_WANT_OPTIMIZE_DAX_VMEMMAP
 bool vmemmap_can_optimize(struct vmem_altmap *altmap, struct dev_pagemap *pgmap)
 {
 	if (radix_enabled())
@@ -920,11 +996,12 @@ bool vmemmap_can_optimize(struct vmem_altmap *altmap, struct dev_pagemap *pgmap)
 
 	return false;
 }
+#endif
 
 int __meminit vmemmap_check_pmd(pmd_t *pmdp, int node,
 				unsigned long addr, unsigned long next)
 {
-	int large = pmd_large(*pmdp);
+	int large = pmd_leaf(*pmdp);
 
 	if (large)
 		vmemmap_verify(pmdp_ptep(pmdp), node, addr, next);
@@ -1056,6 +1133,19 @@ int __meminit radix__vmemmap_populate(unsigned long start, unsigned long end, in
 	pmd_t *pmd;
 	pte_t *pte;
 
+	/*
+	 * Make sure we align the start vmemmap addr so that we calculate
+	 * the correct start_pfn in altmap boundary check to decided whether
+	 * we should use altmap or RAM based backing memory allocation. Also
+	 * the address need to be aligned for set_pte operation.
+
+	 * If the start addr is already PMD_SIZE aligned we will try to use
+	 * a pmd mapping. We don't want to be too aggressive here beacause
+	 * that will cause more allocations in RAM. So only if the namespace
+	 * vmemmap start addr is PMD_SIZE aligned we will use PMD mapping.
+	 */
+
+	start = ALIGN_DOWN(start, PAGE_SIZE);
 	for (addr = start; addr < end; addr = next) {
 		next = pmd_addr_end(addr, end);
 
@@ -1081,8 +1171,8 @@ int __meminit radix__vmemmap_populate(unsigned long start, unsigned long end, in
 			 * in altmap block allocation failures, in which case
 			 * we fallback to RAM for vmemmap allocation.
 			 */
-			if (altmap && (!IS_ALIGNED(addr, PMD_SIZE) ||
-				       altmap_cross_boundary(altmap, addr, PMD_SIZE))) {
+			if (!IS_ALIGNED(addr, PMD_SIZE) || (altmap &&
+			    altmap_cross_boundary(altmap, addr, PMD_SIZE))) {
 				/*
 				 * make sure we don't create altmap mappings
 				 * covering things outside the device.
@@ -1228,7 +1318,6 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 	 * covering out both edges.
 	 */
 	unsigned long addr;
-	unsigned long addr_pfn = start_pfn;
 	unsigned long next;
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -1249,7 +1338,6 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 
 		if (pmd_leaf(READ_ONCE(*pmd))) {
 			/* existing huge mapping. Skip the range */
-			addr_pfn += (PMD_SIZE >> PAGE_SHIFT);
 			next = pmd_addr_end(addr, end);
 			continue;
 		}
@@ -1262,11 +1350,11 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 			 * page whose VMEMMAP_RESERVE_NR pages were mapped and
 			 * this request fall in those pages.
 			 */
-			addr_pfn += 1;
 			next = addr + PAGE_SIZE;
 			continue;
 		} else {
 			unsigned long nr_pages = pgmap_vmemmap_nr(pgmap);
+			unsigned long addr_pfn = page_to_pfn((struct page *)addr);
 			unsigned long pfn_offset = addr_pfn - ALIGN_DOWN(addr_pfn, nr_pages);
 			pte_t *tail_page_pte;
 
@@ -1290,7 +1378,6 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 				if (!pte)
 					return -ENOMEM;
 
-				addr_pfn += 2;
 				next = addr + 2 * PAGE_SIZE;
 				continue;
 			}
@@ -1306,7 +1393,6 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 					return -ENOMEM;
 				vmemmap_verify(pte, node, addr, addr + PAGE_SIZE);
 
-				addr_pfn += 1;
 				next = addr + PAGE_SIZE;
 				continue;
 			}
@@ -1316,7 +1402,6 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 				return -ENOMEM;
 			vmemmap_verify(pte, node, addr, addr + PAGE_SIZE);
 
-			addr_pfn += 1;
 			next = addr + PAGE_SIZE;
 			continue;
 		}

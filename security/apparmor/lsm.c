@@ -851,32 +851,14 @@ static int apparmor_task_kill(struct task_struct *target, struct kernel_siginfo 
 }
 
 /**
- * apparmor_sk_alloc_security - allocate and attach the sk_security field
- */
-static int apparmor_sk_alloc_security(struct sock *sk, int family, gfp_t flags)
-{
-	struct aa_sk_ctx *ctx;
-
-	ctx = kzalloc(sizeof(*ctx), flags);
-	if (!ctx)
-		return -ENOMEM;
-
-	SK_CTX(sk) = ctx;
-
-	return 0;
-}
-
-/**
  * apparmor_sk_free_security - free the sk_security field
  */
 static void apparmor_sk_free_security(struct sock *sk)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
 
-	SK_CTX(sk) = NULL;
 	aa_put_label(ctx->label);
 	aa_put_label(ctx->peer);
-	kfree(ctx);
 }
 
 /**
@@ -885,8 +867,8 @@ static void apparmor_sk_free_security(struct sock *sk)
 static void apparmor_sk_clone_security(const struct sock *sk,
 				       struct sock *newsk)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
-	struct aa_sk_ctx *new = SK_CTX(newsk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
+	struct aa_sk_ctx *new = aa_sock(newsk);
 
 	if (new->label)
 		aa_put_label(new->label);
@@ -940,7 +922,7 @@ static int apparmor_socket_post_create(struct socket *sock, int family,
 		label = aa_get_current_label();
 
 	if (sock->sk) {
-		struct aa_sk_ctx *ctx = SK_CTX(sock->sk);
+		struct aa_sk_ctx *ctx = aa_sock(sock->sk);
 
 		aa_put_label(ctx->label);
 		ctx->label = aa_get_label(label);
@@ -1033,7 +1015,21 @@ static int aa_sock_msg_perm(const char *op, u32 request, struct socket *sock,
 static int apparmor_socket_sendmsg(struct socket *sock,
 				   struct msghdr *msg, int size)
 {
-	return aa_sock_msg_perm(OP_SENDMSG, AA_MAY_SEND, sock, msg, size);
+	int error = aa_sock_msg_perm(OP_SENDMSG, AA_MAY_SEND, sock, msg, size);
+
+	if (error)
+		return error;
+
+	/* TCP fast open carries connect() semantics in sendmsg(); mediate
+	 * the implicit connect so it cannot bypass the connect permission.
+	 */
+	if ((msg->msg_flags & MSG_FASTOPEN) && msg->msg_name &&
+	    (sk_is_tcp(sock->sk) ||
+	     (sk_is_inet(sock->sk) && sock->sk->sk_type == SOCK_STREAM &&
+	      sock->sk->sk_protocol == IPPROTO_MPTCP)))
+		error = aa_sk_perm(OP_CONNECT, AA_MAY_CONNECT, sock->sk);
+
+	return error;
 }
 
 /**
@@ -1125,7 +1121,7 @@ static int apparmor_socket_shutdown(struct socket *sock, int how)
  */
 static int apparmor_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
 
 	if (!skb->secmark)
 		return 0;
@@ -1145,7 +1141,7 @@ static int apparmor_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 
 static struct aa_label *sk_peer_label(struct sock *sk)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
 
 	if (ctx->peer)
 		return ctx->peer;
@@ -1226,7 +1222,7 @@ static int apparmor_socket_getpeersec_dgram(struct socket *sock,
  */
 static void apparmor_sock_graft(struct sock *sk, struct socket *parent)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
 
 	if (!ctx->label)
 		ctx->label = aa_get_current_label();
@@ -1236,7 +1232,7 @@ static void apparmor_sock_graft(struct sock *sk, struct socket *parent)
 static int apparmor_inet_conn_request(const struct sock *sk, struct sk_buff *skb,
 				      struct request_sock *req)
 {
-	struct aa_sk_ctx *ctx = SK_CTX(sk);
+	struct aa_sk_ctx *ctx = aa_sock(sk);
 
 	if (!skb->secmark)
 		return 0;
@@ -1253,6 +1249,7 @@ struct lsm_blob_sizes apparmor_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct aa_label *),
 	.lbs_file = sizeof(struct aa_file_ctx),
 	.lbs_task = sizeof(struct aa_task_ctx),
+	.lbs_sock = sizeof(struct aa_sk_ctx),
 };
 
 static struct security_hook_list apparmor_hooks[] __ro_after_init = {
@@ -1291,7 +1288,6 @@ static struct security_hook_list apparmor_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(getprocattr, apparmor_getprocattr),
 	LSM_HOOK_INIT(setprocattr, apparmor_setprocattr),
 
-	LSM_HOOK_INIT(sk_alloc_security, apparmor_sk_alloc_security),
 	LSM_HOOK_INIT(sk_free_security, apparmor_sk_free_security),
 	LSM_HOOK_INIT(sk_clone_security, apparmor_sk_clone_security),
 
@@ -1850,7 +1846,7 @@ static unsigned int apparmor_ip_postroute(void *priv,
 	if (sk == NULL)
 		return NF_ACCEPT;
 
-	ctx = SK_CTX(sk);
+	ctx = aa_sock(sk);
 	if (!apparmor_secmark_check(ctx->label, OP_SENDMSG, AA_MAY_SEND,
 				    skb->secmark, sk))
 		return NF_ACCEPT;
@@ -1908,6 +1904,69 @@ static int __init apparmor_nf_ip_init(void)
 }
 __initcall(apparmor_nf_ip_init);
 #endif
+
+static char nulldfa_src[] __aligned(8) = {
+	#include "nulldfa.in"
+};
+struct aa_dfa *nulldfa;
+
+static char stacksplitdfa_src[] __aligned(8) = {
+	#include "stacksplitdfa.in"
+};
+struct aa_dfa *stacksplitdfa;
+struct aa_policydb *nullpdb;
+
+static int __init aa_setup_dfa_engine(void)
+{
+	int error = -ENOMEM;
+
+	nullpdb = aa_alloc_pdb(GFP_KERNEL);
+	if (!nullpdb)
+		return -ENOMEM;
+
+	nulldfa = aa_dfa_unpack(nulldfa_src, sizeof(nulldfa_src),
+			    TO_ACCEPT1_FLAG(YYTD_DATA32) |
+			    TO_ACCEPT2_FLAG(YYTD_DATA32));
+	if (IS_ERR(nulldfa)) {
+		error = PTR_ERR(nulldfa);
+		goto fail;
+	}
+	nullpdb->dfa = aa_get_dfa(nulldfa);
+	nullpdb->perms = kcalloc(2, sizeof(struct aa_perms), GFP_KERNEL);
+	if (!nullpdb->perms)
+		goto fail;
+	nullpdb->size = 2;
+
+	stacksplitdfa = aa_dfa_unpack(stacksplitdfa_src,
+				      sizeof(stacksplitdfa_src),
+				      TO_ACCEPT1_FLAG(YYTD_DATA32) |
+				      TO_ACCEPT2_FLAG(YYTD_DATA32));
+	if (IS_ERR(stacksplitdfa)) {
+		error = PTR_ERR(stacksplitdfa);
+		goto fail;
+	}
+
+	return 0;
+
+fail:
+	aa_put_pdb(nullpdb);
+	aa_put_dfa(nulldfa);
+	nullpdb = NULL;
+	nulldfa = NULL;
+	stacksplitdfa = NULL;
+
+	return error;
+}
+
+static void __init aa_teardown_dfa_engine(void)
+{
+	aa_put_dfa(stacksplitdfa);
+	aa_put_dfa(nulldfa);
+	aa_put_pdb(nullpdb);
+	nullpdb = NULL;
+	stacksplitdfa = NULL;
+	nulldfa = NULL;
+}
 
 static int __init apparmor_init(void)
 {
