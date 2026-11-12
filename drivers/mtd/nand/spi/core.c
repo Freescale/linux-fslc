@@ -624,7 +624,10 @@ static int spinand_write_page(struct spinand_device *spinand,
 			   SPINAND_WRITE_INITIAL_DELAY_US,
 			   SPINAND_WRITE_POLL_DELAY_US,
 			   &status);
-	if (!ret && (status & STATUS_PROG_FAILED))
+	if (ret)
+		return ret;
+
+	if (status & STATUS_PROG_FAILED)
 		return -EIO;
 
 	return nand_ecc_finish_io_req(nand, (struct nand_page_io_req *)req);
@@ -1040,6 +1043,8 @@ spinand_select_op_variant(struct spinand_device *spinand,
 			ret = spi_mem_adjust_op_size(spinand->spimem, &op);
 			if (ret)
 				break;
+
+			spi_mem_adjust_op_freq(spinand->spimem, &op);
 
 			if (!spi_mem_supports_op(spinand->spimem, &op))
 				break;
