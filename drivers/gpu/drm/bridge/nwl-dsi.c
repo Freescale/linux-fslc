@@ -160,6 +160,8 @@ struct nwl_dsi {
 	struct nwl_dsi_transfer *xfer;
 	struct list_head valid_modes;
 	bool use_dcss;
+
+	unsigned int endpoint;
 };
 
 static const struct regmap_config nwl_dsi_regmap_config = {
@@ -1439,6 +1441,7 @@ static int nwl_dsi_select_input(struct nwl_dsi *dsi)
 		remote = of_graph_get_remote_node(dsi->dev->of_node, 0,
 						  NWL_DSI_ENDPOINT_LCDIF);
 		if (remote) {
+			dsi->endpoint = NWL_DSI_ENDPOINT_LCDIF;
 			use_dcss_or_epdc = 0;
 		} else {
 			remote = of_graph_get_remote_node(dsi->dev->of_node, 0,
@@ -1448,6 +1451,7 @@ static int nwl_dsi_select_input(struct nwl_dsi *dsi)
 					      "No valid input endpoint found\n");
 				return -EINVAL;
 			}
+			dsi->endpoint = NWL_DSI_ENDPOINT_DCSS;
 		}
 
 		DRM_DEV_INFO(dsi->dev, "Using %s as input source\n",
@@ -1456,6 +1460,7 @@ static int nwl_dsi_select_input(struct nwl_dsi *dsi)
 		remote = of_graph_get_remote_node(dsi->dev->of_node, 0,
 						  NWL_DSI_ENDPOINT_DCNANO);
 		if (remote) {
+			dsi->endpoint = NWL_DSI_ENDPOINT_DCNANO;
 			use_dcss_or_epdc = 0;
 		} else {
 			remote = of_graph_get_remote_node(dsi->dev->of_node, 0,
@@ -1465,6 +1470,7 @@ static int nwl_dsi_select_input(struct nwl_dsi *dsi)
 					      "No valid input endpoint found\n");
 				return -EINVAL;
 			}
+			dsi->endpoint = NWL_DSI_ENDPOINT_EPDC;
 		}
 
 		DRM_DEV_INFO(dsi->dev, "Using %s as input source\n",
@@ -1474,7 +1480,7 @@ static int nwl_dsi_select_input(struct nwl_dsi *dsi)
 		return -EINVAL;
 	}
 
-	ret = mux_control_try_select(dsi->mux, use_dcss_or_epdc);
+	ret = mux_control_try_select(dsi->mux, dsi->endpoint);
 	if (ret < 0)
 		DRM_DEV_ERROR(dsi->dev, "Failed to select input: %d\n", ret);
 
