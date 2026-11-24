@@ -587,6 +587,8 @@ static int tee_crypt_open_session(struct tee_crypt_priv_data *tc_prv_ctx)
 	if ((ret < 0) || (sess_arg.ret != 0)) {
 		pr_err("tee_client_open_session failed, err: %x\n",
 		       sess_arg.ret);
+		if (!ret)
+			ret = -EINVAL;
 		goto out_ctx;
 	}
 	tc_prv_ctx->session_id = sess_arg.session;
