@@ -1514,8 +1514,14 @@ static int imx_uart_startup(struct uart_port *port)
 
 	/* Can we enable the DMA support? */
 	if (!uart_console(port) && imx_uart_dma_init(sport) == 0) {
-		lockdep_set_subclass(&port->lock, 1);
-		dma_is_inited = 1;
+		/* Note: enable dma request after transfer start! */
+		if (imx_uart_start_rx_dma(sport)) {
+			dev_warn(port->dev, "RX DMA cannot start, using PIO\n");
+			imx_uart_dma_exit(sport);
+		} else {
+			lockdep_set_subclass(&port->lock, 1);
+			dma_is_inited = 1;
+		}
 	}
 
 	uart_port_lock_irqsave(&sport->port, &flags);
@@ -1577,8 +1583,6 @@ static int imx_uart_startup(struct uart_port *port)
 	imx_uart_enable_ms(&sport->port);
 
 	if (dma_is_inited) {
-		/* Note: enable dma request after transfer start! */
-		imx_uart_start_rx_dma(sport);
 		imx_uart_enable_dma(sport);
 	} else {
 		ucr1 = imx_uart_readl(sport, UCR1);
