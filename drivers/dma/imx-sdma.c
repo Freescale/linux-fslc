@@ -1697,7 +1697,7 @@ static int sdma_runtime_resume(struct device *dev)
 	/* Do nothing at HW level if audiomix which shared with audio driver
 	 * not off indeed.
 	 */
-	if (readl_relaxed(sdma->regs + SDMA_H_C0PTR)) {
+	if (sdma->drvdata->pm_runtime && readl_relaxed(sdma->regs + SDMA_H_C0PTR)) {
 		if (sdma->iram_pool)
 			sdma->bd0 = gen_pool_dma_alloc(sdma->iram_pool,
 					sizeof(struct sdma_buffer_descriptor),
@@ -1818,8 +1818,8 @@ static void sdma_free_chan_resources(struct dma_chan *chan)
 	struct sdma_channel *sdmac = to_sdma_chan(chan);
 
 	/*
-	 * Per fw_data is null which means firmware not loaded and sdma
-	 * not initialized, directly return. This happens in below case:
+	 * If fw_data is NULL and is_on is false, sdma is not initialized,
+	 * so return directly. This happens in below case:
 	 *
 	 * -- driver request dma chan in probe phase, after that driver
 	 *    fall into -EPROBE_DEFER and free channel again without
@@ -1828,7 +1828,7 @@ static void sdma_free_chan_resources(struct dma_chan *chan)
 	 *    pm_runtime is false.
 	 *
 	 */
-	if (unlikely(!sdmac->sdma->fw_data))
+	if (unlikely(!sdmac->sdma->fw_data && !sdmac->sdma->is_on))
 		return;
 
 	if (sdma_clk_enable(sdmac->sdma))
@@ -2342,8 +2342,9 @@ static void sdma_load_firmware(const struct firmware *fw, void *context)
 
 		memcpy(sdma->fw_data, fw->data, fw->size);
 
-		if (!sdma->drvdata->pm_runtime)
-			sdma_runtime_resume(sdma->dev);
+		/* Without runtime PM, the engine runs since probe. */
+		if (!sdma->drvdata->pm_runtime && sdma_load_script(sdma))
+			dev_warn(sdma->dev, "failed to load script.\n");
 	}
 
 err_firmware:
@@ -2630,10 +2631,21 @@ static int sdma_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, sdma);
 
+	/*
+	 * Without runtime PM, nothing else starts the engine. Start it now,
+	 * so that channels with ROM scripts work before the RAM scripts are
+	 * loaded.
+	 */
+	if (!sdma->drvdata->pm_runtime) {
+		ret = sdma_runtime_resume(&pdev->dev);
+		if (ret)
+			goto err_init;
+	}
+
 	ret = dma_async_device_register(&sdma->dma_device);
 	if (ret) {
 		dev_err(&pdev->dev, "unable to register\n");
-		goto err_init;
+		goto err_engine;
 	}
 
 	if (np) {
@@ -2679,6 +2691,9 @@ static int sdma_probe(struct platform_device *pdev)
 
 err_register:
 	dma_async_device_unregister(&sdma->dma_device);
+err_engine:
+	if (!sdma->drvdata->pm_runtime)
+		sdma_runtime_suspend(&pdev->dev);
 err_init:
 	kfree(sdma->script_addrs);
 err_irq:
@@ -2808,7 +2823,7 @@ static int sdma_resume(struct device *dev)
 	/* prepare priority for channel0 to start */
 	sdma_set_channel_priority(&sdma->channel[0], MXC_SDMA_MAX_PRIORITY);
 
-	if (sdma_load_script(sdma))
+	if (sdma->fw_data && sdma_load_script(sdma))
 		dev_warn(sdma->dev, "failed to load firmware.\n");
 
 	ret = sdma_save_restore_context(sdma, false);
